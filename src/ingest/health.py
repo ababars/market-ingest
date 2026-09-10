@@ -110,22 +110,29 @@ class SequenceTracker:
 
     def __init__(self) -> None:
         self._last: dict[str, int] = {}
+        self._reconnected: set[str] = set()
 
-    def check(self, symbol: str, seq: int) -> int:
+    def check(self, symbol: str, seq: int) -> tuple[int, bool]:
+        """Returns (missing, spans_reconnect)."""
         prev = self._last.get(symbol)
+        spans = symbol in self._reconnected
+        self._reconnected.discard(symbol)
         self._last[symbol] = max(seq, prev) if prev is not None else seq
         if prev is None or seq <= prev:
-            return 0
-        return seq - prev - 1
+            return 0, spans
+        return seq - prev - 1, spans
 
-    def reset(self, symbol: str | None = None) -> None:
-        # After a reconnect the exchange may resume anywhere; a jump across the
-        # reconnect boundary is a real gap, but we record it as a connection
-        # event instead of a fake million-message sequence gap.
-        if symbol is None:
-            self._last.clear()
-        else:
-            self._last.pop(symbol, None)
+    def mark_reconnect(self) -> None:
+        """Note that a reconnect happened without forgetting where we were.
+
+        The first version cleared the sequence state here, on the theory that a
+        jump across a reconnect would otherwise look like a huge fake gap. That
+        was backwards: aggregate-trade ids are contiguous per symbol, so the
+        jump measures exactly how many trades the outage cost - and a large
+        number is informative, not spurious. Forgetting it threw away the one
+        figure worth having. Gaps found across a reconnect are recorded
+        separately so a planned restart can be told from a silent drop."""
+        self._reconnected.update(self._last)
 
 
 def new_session_id() -> str:

@@ -123,9 +123,9 @@ class BinanceUM:
             except Exception as exc:  # noqa: BLE001
                 self._event(stream, "error", f"{type(exc).__name__}: {exc}")
                 log.warning("%s error: %s", stream, exc)
-            # A reconnect means the id sequence may jump; forget it so the jump
-            # is not miscounted as a million missing trades.
-            self.seq.reset()
+            # Keep the sequence state: the jump across this reconnect is the
+            # measurement of what the outage cost us.
+            self.seq.mark_reconnect()
             attempt += 1
             delay = min(60.0, (2 ** min(attempt, 6)) * 0.5) * (0.5 + random.random())
             self._event(stream, "reconnect", f"attempt={attempt} in {delay:.1f}s")
@@ -211,12 +211,16 @@ class BinanceUM:
         ev = float(payload["E"])
         agg_id = int(payload["a"])
 
-        missing = self.seq.check(sym, agg_id)
+        missing, spans_reconnect = self.seq.check(sym, agg_id)
         if missing:
             st.gaps += 1
             self.sink.write("ops.sequence_gaps", {
                 "detected_at": ch_ts(recv_ms),
-                "exchange": EXCHANGE, "stream": "agg_trade", "symbol": sym,
+                "exchange": EXCHANGE,
+                # Distinguishes "we were restarted" from "the feed dropped
+                # messages while we were connected" - very different problems.
+                "stream": "agg_trade/reconnect" if spans_reconnect else "agg_trade",
+                "symbol": sym,
                 "session_id": self.session_id,
                 "expected_id": agg_id - missing, "received_id": agg_id,
                 "missing": missing,
