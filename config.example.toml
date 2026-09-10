@@ -25,7 +25,7 @@ focus_symbols = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
     "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT",
     "LTCUSDT", "TRXUSDT", "DOTUSDT", "NEARUSDT", "APTUSDT",
-    "ARBUSDT", "OPUSDT", "TONUSDT", "FILUSDT", "INJUSDT",
+    "ARBUSDT", "OPUSDT", "HYPEUSDT", "FILUSDT", "INJUSDT",
 ]
 
 # Open interest has no WebSocket stream - it is polled over REST.

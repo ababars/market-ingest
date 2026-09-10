@@ -300,9 +300,45 @@ class BinanceUM:
                 self._roll_health()
                 await asyncio.sleep(max(1.0, period - (time.monotonic() - t0)))
 
+    # ------------------------------------------------------- config validation
+
+    async def _validate_focus(self) -> None:
+        """Check every configured focus symbol actually trades.
+
+        A delisted or settling symbol is the quietest possible failure: it is
+        spelled correctly, the subscription is accepted, and it simply never
+        produces a row. Caught in the field with TONUSDT, whose status had moved
+        to SETTLING - the collector looked perfectly healthy while silently
+        covering 19 symbols instead of 20.
+        """
+        timeout = aiohttp.ClientTimeout(total=30)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.get(f"{REST}/fapi/v1/exchangeInfo") as r:
+                    r.raise_for_status()
+                    info = await r.json()
+        except Exception as exc:  # noqa: BLE001 - never block startup on this
+            self._event("config", "error", f"exchangeInfo unavailable: {exc}")
+            log.warning("could not validate focus symbols: %s", exc)
+            return
+
+        status = {d["symbol"]: d.get("status", "") for d in info.get("symbols", [])}
+        for sym in sorted(self.focus):
+            st = status.get(sym)
+            if st is None:
+                self._event("config", "error", f"{sym} does not exist on {EXCHANGE}")
+                log.error("focus symbol %s does not exist on this venue", sym)
+            elif st != "TRADING":
+                self._event("config", "error", f"{sym} status={st}, expect no data")
+                log.error("focus symbol %s is %s, not TRADING - it will produce no data", sym, st)
+        tradable = sum(1 for s in self.focus if status.get(s) == "TRADING")
+        self._event("config", "subscribed", f"{tradable}/{len(self.focus)} focus symbols tradable")
+        log.info("focus universe: %d/%d symbols tradable", tradable, len(self.focus))
+
     # -------------------------------------------------------------------- run
 
     async def run(self) -> None:
+        await self._validate_focus()
         focus_streams = "/".join(f"{s.lower()}@aggTrade" for s in sorted(self.focus))
         tasks = [
             asyncio.create_task(
