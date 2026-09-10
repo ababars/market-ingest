@@ -1,0 +1,12 @@
+[Unit]
+Description=Sample archive size every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+# Metrics are only useful if the sample lands close to when Netdata expects it;
+# no randomised delay here.
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

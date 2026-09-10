@@ -77,8 +77,19 @@ ssh "$HOST" "set -e; for f in $DEST/schema/*.sql; do clickhouse-client --multiqu
 say "clickhouse ingest user"
 ssh "$HOST" "sudo bash $DEST/deploy/setup_ch_user.sh"
 
-say "systemd unit"
-ssh "$HOST" "sudo install -m 0644 $DEST/deploy/market-ingest@.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+say "netdata charts and alarms"
+ssh "$HOST" "sudo install -d -m 0755 /etc/netdata/statsd.d /etc/netdata/health.d && \
+  sudo install -m 0644 $DEST/deploy/netdata/market_ingest.conf /etc/netdata/statsd.d/ && \
+  sudo install -m 0644 $DEST/deploy/netdata/health_market_ingest.conf /etc/netdata/health.d/market_ingest.conf && \
+  sudo systemctl reload-or-restart netdata"
+
+say "systemd units"
+ssh "$HOST" "sudo install -m 0644 \
+    $DEST/deploy/market-ingest@.service \
+    $DEST/deploy/market-ingest-storage-probe.service \
+    $DEST/deploy/market-ingest-storage-probe.timer \
+    /etc/systemd/system/ && sudo systemctl daemon-reload && \
+    sudo systemctl enable --now market-ingest-storage-probe.timer"
 
 if ssh "$HOST" "systemctl is-enabled --quiet market-ingest@binance_um" 2>/dev/null; then
   say "restarting collector"

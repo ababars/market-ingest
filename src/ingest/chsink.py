@@ -71,6 +71,11 @@ class ClickHouseSink:
             self.dropped_rows += overflow
             log.error("sink queue overflow on %s, dropped %d rows", table, overflow)
 
+    def queued_rows(self) -> int:
+        """Rows waiting to be inserted. Growth here is the earliest visible
+        sign that ClickHouse is struggling, well before anything errors."""
+        return sum(len(q) for q in self._queues.values())
+
     async def start(self) -> None:
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout, auth=self._auth)

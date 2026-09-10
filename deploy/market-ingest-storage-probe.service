@@ -1,0 +1,18 @@
+[Unit]
+Description=market-ingest storage size probe (one shot)
+After=clickhouse-server.service
+
+[Service]
+Type=oneshot
+User=ingest
+Group=ingest
+WorkingDirectory=/opt/market-ingest
+Environment=PYTHONPATH=/opt/market-ingest/src
+EnvironmentFile=/etc/market-ingest/env
+ExecStart=/opt/market-ingest/.venv/bin/python -m ingest.storage_probe \
+    --config /etc/market-ingest/config.toml
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=

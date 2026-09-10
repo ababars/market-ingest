@@ -25,6 +25,7 @@ import time
 import aiohttp
 import websockets
 
+from ..metrics import Statsd
 from ..health import (
     SequenceTracker,
     StreamStats,
@@ -54,8 +55,9 @@ def _extra(payload: dict, known: set[str]) -> str:
 
 
 class BinanceUM:
-    def __init__(self, cfg: dict, sink, *, focus: list[str]) -> None:
+    def __init__(self, cfg: dict, sink, *, focus: list[str], sd: Statsd) -> None:
         self.sink = sink
+        self.sd = sd
         self.cfg = cfg
         self.focus = {s.upper() for s in focus}
         self.session_id = new_session_id()
@@ -95,6 +97,11 @@ class BinanceUM:
             if row:
                 row["insert_errors"] = self.sink.insert_errors
                 self.sink.write("ops.stream_health", row)
+        # Sink health belongs on the same dashboard as throughput: a growing
+        # queue is the earliest visible sign that ClickHouse is in trouble.
+        self.sd.gauge(f"queue_rows.{EXCHANGE}", self.sink.queued_rows())
+        self.sd.gauge(f"insert_errors.{EXCHANGE}", self.sink.insert_errors)
+        self.sd.gauge(f"dropped_rows.{EXCHANGE}", self.sink.dropped_rows)
 
     # ------------------------------------------------------------ ws plumbing
 
@@ -203,6 +210,10 @@ class BinanceUM:
 
         st.observe(nbytes=nbytes, rows=len(items), lag_ms=lag, symbol=None)
         st.symbols.update(i.get("s", "") for i in items)
+        self.sd.incr(f"rows.{EXCHANGE}.mark_price", len(items))
+        self.sd.incr(f"bytes.{EXCHANGE}.mark_price", nbytes)
+        if lag is not None:
+            self.sd.gauge(f"lag_ms.{EXCHANGE}.mark_price", max(0, lag))
 
     def _handle_agg(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
         if payload.get("e") != "aggTrade":
@@ -240,6 +251,11 @@ class BinanceUM:
             "extra": _extra(payload, KNOWN_AGG),
         })
         st.observe(nbytes=nbytes, rows=1, lag_ms=int(recv_ms - ev), symbol=sym)
+        self.sd.incr(f"rows.{EXCHANGE}.agg_trade", 1)
+        self.sd.incr(f"bytes.{EXCHANGE}.agg_trade", nbytes)
+        self.sd.gauge(f"lag_ms.{EXCHANGE}.agg_trade", max(0, int(recv_ms - ev)))
+        if missing:
+            self.sd.incr(f"gaps.{EXCHANGE}.agg_trade", missing)
 
     def _handle_force(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
         if payload.get("e") != "forceOrder":
@@ -264,6 +280,8 @@ class BinanceUM:
             "extra": _extra(o, KNOWN_FORCE),
         })
         st.observe(nbytes=nbytes, rows=1, lag_ms=int(recv_ms - ev), symbol=o.get("s"))
+        self.sd.incr(f"rows.{EXCHANGE}.force_order", 1)
+        self.sd.incr(f"bytes.{EXCHANGE}.force_order", nbytes)
 
     # ---------------------------------------------------------- open interest
 
@@ -298,6 +316,7 @@ class BinanceUM:
                         })
                         st.observe(nbytes=len(str(d)), rows=1,
                                    lag_ms=int(recv_ms - ev), symbol=d["symbol"])
+                        self.sd.incr(f"rows.{EXCHANGE}.open_interest", 1)
                     except Exception as exc:  # noqa: BLE001
                         self._event("open_interest", "error", f"{sym}: {exc}")
                     await asyncio.sleep(0.05)  # stay well inside the REST weight limit
@@ -342,6 +361,15 @@ class BinanceUM:
     # -------------------------------------------------------------------- run
 
     async def run(self) -> None:
+        # Publish the quality counters at zero from the start, so their charts
+        # and the alarms watching them exist before anything goes wrong.
+        self.sd.prime(
+            f"gaps.{EXCHANGE}.agg_trade",
+            f"rows.{EXCHANGE}.agg_trade",
+            f"rows.{EXCHANGE}.mark_price",
+            f"rows.{EXCHANGE}.force_order",
+            f"rows.{EXCHANGE}.open_interest",
+        )
         await self._validate_focus()
         focus_streams = "/".join(f"{s.lower()}@aggTrade" for s in sorted(self.focus))
         tasks = [

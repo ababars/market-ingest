@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .chsink import ClickHouseSink
 from .exchanges.binance_um import BinanceUM
+from .metrics import Statsd
 
 EXCHANGES = {"binance_um": BinanceUM}
 
@@ -59,14 +60,24 @@ async def amain(args) -> int:
         await sink.stop()
         return 3
 
+    m = cfg.get("metrics", {})
+    sd = Statsd(
+        host=m.get("statsd_host", "127.0.0.1"),
+        port=int(m.get("statsd_port", 8125)),
+        prefix=m.get("prefix", "market_ingest"),
+        enabled=bool(m.get("enabled", True)),
+    )
+    await sd.start()
+
     ex_cfg = cfg.get(args.exchange, {})
     if not ex_cfg.get("enabled", True):
         logging.warning("%s is disabled in config, nothing to do", args.exchange)
+        await sd.stop()
         await sink.stop()
         return 0
 
     collector = EXCHANGES[args.exchange](
-        ex_cfg, sink, focus=ex_cfg.get("focus_symbols", [])
+        ex_cfg, sink, focus=ex_cfg.get("focus_symbols", []), sd=sd
     )
 
     loop = asyncio.get_running_loop()
@@ -85,6 +96,7 @@ async def amain(args) -> int:
     # Drain the sink so the last couple of seconds of market data are not lost
     # to a routine restart.
     await sink.stop()
+    await sd.stop()
     logging.info("inserted=%d dropped=%d insert_errors=%d",
                  sink.inserted_rows, sink.dropped_rows, sink.insert_errors)
     return 0

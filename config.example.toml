@@ -21,6 +21,15 @@ batch_max_seconds = 30.0
 # oldest and count it - a collector that OOMs loses far more than a few rows.
 queue_max_rows    = 400000
 
+# Throughput and archive size are published to Netdata's built-in StatsD
+# receiver (UDP 127.0.0.1:8125), so collector metrics appear next to the host's
+# CPU and disk instead of in a second dashboard.
+[metrics]
+enabled     = true
+statsd_host = "127.0.0.1"
+statsd_port = 8125
+prefix      = "market_ingest"
+
 [binance_um]
 enabled = true
 

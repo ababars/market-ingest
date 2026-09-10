@@ -22,6 +22,10 @@ CREATE USER IF NOT EXISTS ingest IDENTIFIED WITH sha256_password BY '${pw}'
 ALTER USER ingest IDENTIFIED WITH sha256_password BY '${pw}';
 GRANT INSERT, SELECT ON market.* TO ingest;
 GRANT INSERT, SELECT ON ops.*    TO ingest;
+-- The storage probe reports how big the archive has grown, which lives in
+-- system.parts. Read-only, and narrower than granting the whole system
+-- database: parts is metadata about our own tables and nothing else.
+GRANT SELECT ON system.parts TO ingest;
 "
 
 umask 077
