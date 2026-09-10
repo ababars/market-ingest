@@ -1,4 +1,4 @@
-# hash7-ingest
+# market-ingest
 
 Сбор публичных рыночных данных с бирж в ClickHouse. Реализует P0.2/P0.3 роадмапа:
 каркас коннекторов и публичные WS. Заменяет Coinglass ($299/мес) первоисточником
@@ -99,11 +99,11 @@ wss://fstream.binance.com/market/ws/btcusdt@aggTrade  работает
 ```
 
 ```bash
-ssh scali sudo systemctl enable --now hash7-ingest@binance_um
+ssh scali sudo systemctl enable --now market-ingest@binance_um
 ```
 
-Конфиг — `/etc/hash7-ingest/config.toml`, пароль ClickHouse — в
-`/etc/hash7-ingest/env` (создаётся `deploy/setup_ch_user.sh`, пользователь
+Конфиг — `/etc/market-ingest/config.toml`, пароль ClickHouse — в
+`/etc/market-ingest/env` (создаётся `deploy/setup_ch_user.sh`, пользователь
 `ingest` имеет только INSERT/SELECT на `market` и `ops`).
 
 ## Тесты

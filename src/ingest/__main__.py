@@ -1,6 +1,6 @@
 """Entry point: one process per exchange.
 
-    python -m ingest --config /etc/hash7-ingest/config.toml --exchange binance_um
+    python -m ingest --config /etc/market-ingest/config.toml --exchange binance_um
 
 One process per exchange, not per stream and not one for everything: a crash in
 the Binance collector must not take Bybit down with it, and each gets its own
@@ -26,7 +26,7 @@ EXCHANGES = {"binance_um": BinanceUM}
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ingest")
-    p.add_argument("--config", default="/etc/hash7-ingest/config.toml", type=Path)
+    p.add_argument("--config", default="/etc/market-ingest/config.toml", type=Path)
     p.add_argument("--exchange", required=True, choices=sorted(EXCHANGES))
     p.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     return p

@@ -1,3 +1,3 @@
--- Managed by hash7-ingest. Applied by deploy/apply_schema.sh (idempotent).
+-- Managed by market-ingest. Applied by deploy/apply_schema.sh (idempotent).
 CREATE DATABASE IF NOT EXISTS market;
 CREATE DATABASE IF NOT EXISTS ops;

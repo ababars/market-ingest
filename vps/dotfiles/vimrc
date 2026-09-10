@@ -1,0 +1,27 @@
+" Minimal server vimrc - managed by vps-provision.
+set nocompatible
+syntax on
+filetype plugin indent on
+
+set encoding=utf-8
+set number
+set ruler
+set showcmd
+set incsearch hlsearch ignorecase smartcase
+set expandtab tabstop=4 shiftwidth=4 softtabstop=4
+set autoindent
+set backspace=indent,eol,start
+set mouse=
+set laststatus=2
+set wildmenu wildmode=longest:full,full
+set undofile undodir=~/.vim/undo
+set directory=~/.vim/swap//
+set backupdir=~/.vim/backup//
+set scrolloff=3
+set clipboard=
+
+" Do not mangle files that are being tailed/rotated.
+set backupcopy=yes
+
+" Editing a file you forgot to sudo:  :w!!
+cnoremap w!! w !sudo tee % >/dev/null

@@ -1,5 +1,5 @@
-# Copy to /etc/hash7-ingest/config.toml on the server.
-# Secrets do NOT live here - see /etc/hash7-ingest/env.
+# Copy to /etc/market-ingest/config.toml on the server.
+# Secrets do NOT live here - see /etc/market-ingest/env.
 
 [clickhouse]
 url      = "http://127.0.0.1:8123"

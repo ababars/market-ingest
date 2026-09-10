@@ -3,8 +3,8 @@
 # Run on the server as root. Idempotent: re-running reuses the stored password.
 set -Eeuo pipefail
 
-CREDS=/etc/hash7-ingest/env
-install -d -m 0750 -g hash7 /etc/hash7-ingest
+CREDS=/etc/market-ingest/env
+install -d -m 0750 -g ingest /etc/market-ingest
 
 if [[ -f "$CREDS" ]] && grep -q '^CH_PASSWORD=' "$CREDS"; then
   pw="$(grep '^CH_PASSWORD=' "$CREDS" | cut -d= -f2-)"
@@ -30,6 +30,6 @@ cat > "$CREDS" <<EOF
 CH_PASSWORD=${pw}
 EOF
 chmod 0640 "$CREDS"
-chgrp hash7 "$CREDS" 2>/dev/null || true
+chgrp ingest "$CREDS" 2>/dev/null || true
 
 echo "ingest user ready; credentials in $CREDS"

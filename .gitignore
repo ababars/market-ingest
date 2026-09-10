@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 .venv/
+logs/
+
+# Deployed config and secrets: config.example.toml is the tracked template.
 config.toml
 .env
-logs/
+
+# Project documents (concept, roadmap, feature inventory, source PDFs).
+# Excluded on request - they stay on disk, just untracked. To version them,
+# delete this line; the markdown is only ~240 KB.
+docs/
