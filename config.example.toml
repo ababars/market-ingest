@@ -8,10 +8,15 @@ database = "market"
 # password comes from the CH_PASSWORD environment variable
 
 [ingest]
-# An insert is sent when either limit is hit first. Small batches keep the
-# archive close to real time; large ones keep ClickHouse from drowning in parts.
-batch_max_rows    = 5000
-batch_max_seconds = 2.0
+# An insert is sent when either limit is hit first.
+#
+# Do not lower batch_max_seconds without measuring. At 2s this produced 1345
+# parts an hour averaging 8 KiB each, and 350 merges to clean up after them -
+# ClickHouse wants few large parts, not many small ones. 30s yields ~120 parts
+# an hour of a workable size. The cost is that a SIGKILL loses up to 30s of
+# data; a normal restart loses nothing, because SIGTERM drains the sink.
+batch_max_rows    = 20000
+batch_max_seconds = 30.0
 # Rows kept in memory when ClickHouse is unreachable. Beyond this we drop the
 # oldest and count it - a collector that OOMs loses far more than a few rows.
 queue_max_rows    = 400000
