@@ -64,10 +64,12 @@ ssh "$HOST" "sudo -u ingest bash -c '
   $DEST/.venv/bin/pip -q install -r $DEST/requirements.txt
 '"
 
-say "schema (idempotent)"
-for f in "$HERE"/schema/*.sql; do
-  ssh "$HOST" "clickhouse-client --multiquery" < "$f"
-done
+# Apply the schema that is ON THE SERVER, not the one on this laptop. In --git
+# mode the code comes from origin while the working tree may sit anywhere
+# relative to it, and a deploy that ships one version of the code with another
+# version of the schema fails in the worst way: quietly, at query time.
+say "schema (idempotent, from $DEST/schema)"
+ssh "$HOST" "set -e; for f in $DEST/schema/*.sql; do clickhouse-client --multiquery < \"\$f\"; done"
 
 say "clickhouse ingest user"
 ssh "$HOST" "sudo bash $DEST/deploy/setup_ch_user.sh"
