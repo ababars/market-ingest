@@ -39,6 +39,11 @@ elif id -u "$OLD_USER" >/dev/null 2>&1; then
   # owns running processes.
   usermod -l "$NEW_USER" "$OLD_USER"
   groupmod -n "$NEW_USER" "$OLD_USER" 2>/dev/null || true
+  # usermod -l renames the login and only the login: the home field goes on
+  # pointing at the old path, which for a --no-create-home account never
+  # existed to begin with. Left alone, $HOME resolves to a missing directory
+  # and every tool that wants a dotfile complains about it.
+  usermod -d /nonexistent "$NEW_USER"
   ok "service account renamed"
 else
   say "creating service account $NEW_USER"
@@ -73,8 +78,8 @@ if [[ -d /opt/market-ingest/.venv ]]; then
   rm -rf /opt/market-ingest/.venv
 fi
 sudo -u "$NEW_USER" python3 -m venv /opt/market-ingest/.venv
-sudo -u "$NEW_USER" /opt/market-ingest/.venv/bin/pip -q install --upgrade pip
-sudo -u "$NEW_USER" /opt/market-ingest/.venv/bin/pip -q install -r /opt/market-ingest/requirements.txt
+sudo -u "$NEW_USER" /opt/market-ingest/.venv/bin/pip -q --no-cache-dir install --upgrade pip
+sudo -u "$NEW_USER" /opt/market-ingest/.venv/bin/pip -q --no-cache-dir install -r /opt/market-ingest/requirements.txt
 ok "virtualenv rebuilt"
 
 # -------------------------------------------------------------------- the unit

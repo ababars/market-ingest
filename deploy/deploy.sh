@@ -56,12 +56,15 @@ else
     "$HERE"/{src,schema,deploy,requirements.txt} "$HOST:$DEST/"
 fi
 
+# --no-cache-dir below: the service account has no home by design, so pip has
+# nowhere to put a cache and says so noisily on every single deploy. The
+# dependency set is two small wheels; the cache was never buying anything.
 say "virtualenv and dependencies"
 ssh "$HOST" "sudo -u ingest bash -c '
   set -e
   [ -d $DEST/.venv ] || python3 -m venv $DEST/.venv
-  $DEST/.venv/bin/pip -q install --upgrade pip
-  $DEST/.venv/bin/pip -q install -r $DEST/requirements.txt
+  $DEST/.venv/bin/pip -q --no-cache-dir install --upgrade pip
+  $DEST/.venv/bin/pip -q --no-cache-dir install -r $DEST/requirements.txt
 '"
 
 # Apply the schema that is ON THE SERVER, not the one on this laptop. In --git
