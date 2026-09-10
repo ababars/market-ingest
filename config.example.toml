@@ -1,0 +1,43 @@
+# Copy to /etc/hash7-ingest/config.toml on the server.
+# Secrets do NOT live here - see /etc/hash7-ingest/env.
+
+[clickhouse]
+url      = "http://127.0.0.1:8123"
+user     = "ingest"
+database = "market"
+# password comes from the CH_PASSWORD environment variable
+
+[ingest]
+# An insert is sent when either limit is hit first. Small batches keep the
+# archive close to real time; large ones keep ClickHouse from drowning in parts.
+batch_max_rows    = 5000
+batch_max_seconds = 2.0
+# Rows kept in memory when ClickHouse is unreachable. Beyond this we drop the
+# oldest and count it - a collector that OOMs loses far more than a few rows.
+queue_max_rows    = 400000
+
+[binance_um]
+enabled = true
+
+# Full-rate capture: every mark-price tick (1/s) and every aggregate trade.
+# Everything NOT in this list still gets one mark-price row per minute.
+focus_symbols = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+    "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT",
+    "LTCUSDT", "TRXUSDT", "DOTUSDT", "NEARUSDT", "APTUSDT",
+    "ARBUSDT", "OPUSDT", "TONUSDT", "FILUSDT", "INJUSDT",
+]
+
+# Open interest has no WebSocket stream - it is polled over REST.
+open_interest_poll_seconds = 60
+open_interest_symbols      = "focus"   # "focus" or "all"
+
+# A stream that goes quiet for longer than this is treated as broken and
+# reconnected. Silence is the failure mode that looks like success.
+[binance_um.stall_seconds]
+mark_price   = 30
+agg_trade    = 900
+force_order  = 7200
+
+# Binance drops WebSocket connections after 24h. Beat it to the punch.
+reconnect_after_hours = 23

@@ -1,0 +1,50 @@
+# systemd template unit: one instance per exchange.
+#   systemctl enable --now hash7-ingest@binance_um
+#
+# Template rather than one unit per exchange so adding Bybit is a symlink,
+# not a copy-paste of a file that then drifts.
+[Unit]
+Description=hash7 market data collector (%i)
+Documentation=https://github.com/greyfenrir/hash7-ingest
+After=network-online.target clickhouse-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hash7
+Group=hash7
+WorkingDirectory=/opt/hash7-ingest
+Environment=PYTHONPATH=/opt/hash7-ingest/src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/hash7-ingest/env
+ExecStart=/opt/hash7-ingest/.venv/bin/python -m ingest \
+    --config /etc/hash7-ingest/config.toml \
+    --exchange %i
+
+# A collector's job is to be running. Always restart, but back off so a
+# misconfiguration does not become a hot loop against the exchange.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# SIGTERM lets the sink drain its last batch instead of dropping it.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Least privilege: the process needs the network and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
