@@ -21,9 +21,12 @@ import json
 import logging
 import os
 import sys
-import tomllib
 import urllib.request
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from .metrics import Statsd
 

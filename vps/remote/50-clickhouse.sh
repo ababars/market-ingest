@@ -6,6 +6,8 @@ set -a; source "$TOOLKIT_ROOT/env"; set +a
 
 CH_DB="${CH_DB:-market}"
 CH_MEM_RATIO="${CH_MEM_RATIO:-0.5}"
+# Absolute cap in bytes; wins over the ratio. For a shared host with lots of RAM.
+CH_MAX_MEMORY="${CH_MAX_MEMORY:-}"
 CREDS=/root/.clickhouse-credentials
 
 section "ClickHouse repository"
@@ -47,6 +49,13 @@ CH_DB=$CH_DB
 EOF
 
 section "Server configuration"
+if [[ -n "$CH_MAX_MEMORY" ]]; then
+  mem_xml="<max_server_memory_usage>${CH_MAX_MEMORY}</max_server_memory_usage>"
+  mark_cache=268435456
+else
+  mem_xml="<max_server_memory_usage_to_ram_ratio>${CH_MEM_RATIO}</max_server_memory_usage_to_ram_ratio>"
+  mark_cache=1073741824
+fi
 write_file /etc/clickhouse-server/config.d/10-vps.xml 0644 <<EOF
 <?xml version="1.0"?>
 <!-- Managed by vps-provision. -->
@@ -57,11 +66,15 @@ write_file /etc/clickhouse-server/config.d/10-vps.xml 0644 <<EOF
          instead of adding a second address next to it. -->
     <listen_host replace="replace">127.0.0.1</listen_host>
 
+    <!-- Server-side default for now(), toDate() and string literals; the host
+         clock may be in a local zone, exchange data is UTC. -->
+    <timezone>UTC</timezone>
+
     <!-- Memory. On 12 GB, ${CH_MEM_RATIO} leaves headroom for the ingest
          processes, Netdata and the page cache, which ClickHouse leans on
          heavily for reads. -->
-    <max_server_memory_usage_to_ram_ratio>${CH_MEM_RATIO}</max_server_memory_usage_to_ram_ratio>
-    <mark_cache_size>1073741824</mark_cache_size>
+    ${mem_xml}
+    <mark_cache_size>${mark_cache}</mark_cache_size>
     <uncompressed_cache_size>0</uncompressed_cache_size>
 
     <!-- A single-writer ingest box does not need the default 100/4096. -->

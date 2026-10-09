@@ -15,8 +15,11 @@ import logging
 import os
 import signal
 import sys
-import tomllib
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from .chsink import ClickHouseSink
 from .exchanges.binance_um import BinanceUM
