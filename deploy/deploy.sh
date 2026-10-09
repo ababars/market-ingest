@@ -19,6 +19,8 @@ say() { printf '\033[36m[ .. ]\033[0m %s\n' "$*"; }
 ok()  { printf '\033[32m[ ok ]\033[0m %s\n' "$*"; }
 
 say "preparing $DEST on $HOST"
+# Fresh server: the service account does not exist yet.
+ssh "$HOST" "id -u ingest >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin ingest"
 ssh "$HOST" "sudo install -d -o ingest -g ingest -m 0755 $DEST && sudo install -d -m 0750 -g ingest /etc/market-ingest"
 
 if [[ "$MODE" == "--git" ]]; then
