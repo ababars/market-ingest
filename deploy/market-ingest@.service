@@ -8,6 +8,8 @@ Description=market data collector (%i)
 Documentation=https://github.com/greyfenrir/market-ingest
 After=network-online.target clickhouse-server.service
 Wants=network-online.target
+# Never give up restarting. Belongs in [Unit]: systemd ignores it under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -25,7 +27,6 @@ ExecStart=/opt/market-ingest/.venv/bin/python -m ingest \
 # misconfiguration does not become a hot loop against the exchange.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=0
 
 # SIGTERM lets the sink drain its last batch instead of dropping it.
 KillSignal=SIGTERM
