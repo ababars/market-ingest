@@ -20,10 +20,9 @@ import asyncio
 import logging
 import time
 
-import aiohttp
-
 from ..health import StreamStats, ch_ts, now_ms
 from ..metrics import Statsd
+from ..rest import RateLimited, RestClient
 from .base import Collector, extra_fields as _extra
 from .binance_um_depth import SYNCING, DepthSync
 
@@ -33,6 +32,19 @@ WS_MARKET = "wss://fstream.binance.com/market"
 WS_PUBLIC = "wss://fstream.binance.com/public"
 REST = "https://fapi.binance.com"
 EXCHANGE = "binance_um"
+# The IP's request weight for the current minute, counted by Binance.
+USED_WEIGHT = "X-MBX-USED-WEIGHT-1M"
+
+
+def depth_weight(limit: int) -> int:
+    """Request weight of GET /fapi/v1/depth at this limit."""
+    if limit <= 50:
+        return 2
+    if limit <= 100:
+        return 5
+    if limit <= 500:
+        return 10
+    return 20
 
 # Fields we model explicitly. Anything else the exchange sends is preserved
 # verbatim in `extra` - Binance added `nq` and `ap` in the 2026 COIN-M merge,
@@ -50,6 +62,10 @@ class BinanceUM(Collector):
         # last mark-price observation per non-focus symbol, flushed once a minute
         self._pending_mark: dict[str, dict] = {}
         self._pending_minute: int = 0
+        # Binance allows 2400 weight a minute per IP; the default leaves half
+        # to whatever else runs from the same address.
+        self.rest = RestClient(REST, budget=int(cfg.get("rest_weight_per_minute", 1200)),
+                               used_header=USED_WEIGHT, on_event=self._event)
 
         # Order book (stream A of the early-collector spec): a local book per
         # symbol, written as one aggregate row per second. Off unless enabled.
@@ -65,8 +81,7 @@ class BinanceUM(Collector):
         self.depth_refresh_min_s = float(dcfg.get("refresh_min_seconds", 60.0))
         if dcfg.get("enabled", False):
             self._init_books({s: DepthSync(s, self.depth_limit) for s in sorted(syms)})
-        self._rest: aiohttp.ClientSession | None = None
-        self._snap_sem: asyncio.Semaphore | None = None
+        self._snap_sem = asyncio.Semaphore(self.depth_parallel)
         # True while the depth WebSocket is connected. A snapshot taken with no
         # stream behind it has no events to align with and is thrown away by
         # the reset at the next open - 20 weight per book, every start.
@@ -276,12 +291,12 @@ class BinanceUM(Collector):
 
         A 1000-level snapshot weighs 20, and at most `max_parallel_snapshots`
         are in flight, so a mass reconnect of every book costs a few hundred
-        weight spread over seconds rather than one burst. 429 and 418 are
-        obeyed: Binance turns ignored 429s into an IP ban.
+        weight spread over seconds rather than one burst. The weight comes out
+        of the collector's REST budget, which also obeys 429 and 418.
 
         Gives up as soon as the stream closes. snapshot_pending stays set, and
         the reset at the next open clears it and lets the scheduler start over."""
-        assert self._rest is not None and self._snap_sem is not None
+        assert self.rest is not None
         gen = sync.generation
         delay = 1.0
 
@@ -293,22 +308,15 @@ class BinanceUM(Collector):
         while wanted():
             snap = None
             async with self._snap_sem:
-                await self._rest_wait()
-                if not wanted():
-                    return
                 try:
-                    async with self._rest.get(
-                        f"{REST}/fapi/v1/depth",
-                        params={"symbol": sync.symbol, "limit": self.depth_limit},
-                    ) as r:
-                        if r.status in (418, 429):
-                            # the next pass waits in _rest_wait, as does
-                            # every other snapshot and the OI poll
-                            self._rest_pause("depth", sync.symbol, r.status, r.headers)
-                            continue
-                        if r.status != 200:
-                            raise RuntimeError(f"HTTP {r.status}: {(await r.text())[:200]}")
-                        snap = await r.json()
+                    snap = await self.rest.get(
+                        "/fapi/v1/depth", {"symbol": sync.symbol, "limit": self.depth_limit},
+                        weight=depth_weight(self.depth_limit), stream="depth",
+                        what=sync.symbol, still_wanted=wanted)
+                    if snap is None:
+                        return      # reset or dropped while waiting for its turn
+                except RateLimited:
+                    continue        # the next call waits out the pause
                 except Exception as exc:  # noqa: BLE001
                     self._event("depth", "error", f"{sync.symbol} snapshot: {type(exc).__name__}: {exc}")
                     log.warning("%s depth snapshot failed: %s", sync.symbol, exc)
@@ -364,51 +372,46 @@ class BinanceUM(Collector):
         period = float(self.cfg.get("open_interest_poll_seconds", 60))
         which = self.cfg.get("open_interest_symbols", "focus")
         st = self._stat("open_interest")
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as s:
-            while True:
-                symbols = sorted(self.focus) if which == "focus" else sorted(self.focus)
-                t0 = time.monotonic()
-                for sym in symbols:
-                    await self._rest_wait()
-                    try:
-                        async with s.get(f"{REST}/fapi/v1/openInterest", params={"symbol": sym}) as r:
-                            if r.status in (418, 429):
-                                self._rest_pause("open_interest", sym, r.status, r.headers)
-                                continue
-                            if r.status != 200:
-                                self._event("open_interest", "error", f"{sym} HTTP {r.status}")
-                                continue
-                            d = await r.json()
-                        recv_ms = now_ms()
-                        ev = float(d.get("time", recv_ms))
-                        self.sink.write("market.open_interest", {
-                            "exchange": EXCHANGE,
-                            "symbol": d["symbol"],
-                            "event_time": ch_ts(ev),
-                            "ingest_time": ch_ts(recv_ms),
-                            "open_interest": float(d["openInterest"]),
-                            "extra": _extra(d, {"symbol", "openInterest", "time"}),
-                        })
-                        st.observe(nbytes=len(str(d)), rows=1,
-                                   lag_ms=int(recv_ms - ev), symbol=d["symbol"])
-                        self.sd.incr(f"rows.{EXCHANGE}.open_interest", 1)
-                    except Exception as exc:  # noqa: BLE001
-                        self._event("open_interest", "error", f"{sym}: {exc}")
-                    await asyncio.sleep(0.05)  # stay well inside the REST weight limit
-                self._roll_health()
-                await asyncio.sleep(max(1.0, period - (time.monotonic() - t0)))
+        assert self.rest is not None
+        while True:
+            symbols = sorted(self.focus) if which == "focus" else sorted(self.focus)
+            t0 = time.monotonic()
+            for sym in symbols:
+                try:
+                    d = await self.rest.get("/fapi/v1/openInterest", {"symbol": sym},
+                                            stream="open_interest", what=sym)
+                except RateLimited:
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    self._event("open_interest", "error", f"{sym}: {exc}")
+                    continue
+                try:
+                    recv_ms = now_ms()
+                    ev = float(d.get("time", recv_ms))
+                    self.sink.write("market.open_interest", {
+                        "exchange": EXCHANGE,
+                        "symbol": d["symbol"],
+                        "event_time": ch_ts(ev),
+                        "ingest_time": ch_ts(recv_ms),
+                        "open_interest": float(d["openInterest"]),
+                        "extra": _extra(d, {"symbol", "openInterest", "time"}),
+                    })
+                    st.observe(nbytes=len(str(d)), rows=1,
+                               lag_ms=int(recv_ms - ev), symbol=d["symbol"])
+                    self.sd.incr(f"rows.{EXCHANGE}.open_interest", 1)
+                except Exception as exc:  # noqa: BLE001
+                    self._event("open_interest", "error", f"{sym}: {exc}")
+                await asyncio.sleep(0.05)  # a poll is not a burst
+            self._roll_health()
+            await asyncio.sleep(max(1.0, period - (time.monotonic() - t0)))
 
     # ------------------------------------------------------- config validation
 
     async def _validate_focus(self) -> None:
         """Check every configured focus symbol actually trades."""
-        timeout = aiohttp.ClientTimeout(total=30)
+        assert self.rest is not None
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as s:
-                async with s.get(f"{REST}/fapi/v1/exchangeInfo") as r:
-                    r.raise_for_status()
-                    info = await r.json()
+            info = await self.rest.get("/fapi/v1/exchangeInfo", stream="config")
         except Exception as exc:  # noqa: BLE001 - never block startup on this
             self._event("config", "error", f"exchangeInfo unavailable: {exc}")
             log.warning("could not validate focus symbols: %s", exc)
@@ -432,13 +435,6 @@ class BinanceUM(Collector):
 
     async def _startup(self) -> None:
         await self._validate_focus()
-        if self.depth:
-            self._rest = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
-            self._snap_sem = asyncio.Semaphore(self.depth_parallel)
-
-    async def _shutdown(self) -> None:
-        if self._rest:
-            await self._rest.close()
 
     def _coroutines(self) -> dict:
         focus_streams = "/".join(f"{s.lower()}@aggTrade" for s in sorted(self.focus))

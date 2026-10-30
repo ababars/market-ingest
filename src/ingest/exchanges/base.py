@@ -8,7 +8,7 @@ difference in the archive:
 
 - ops.connection_events and ops.stream_health rows, and the StatsD gauges;
 - the WebSocket loop: backoff, stall watchdog, rotation before a forced close;
-- one REST pause for the whole collector after a 429/418;
+- one REST client (self.rest): a shared weight budget and one pause after a 429/418;
 - one market.book_agg row per book per second, and the book quality gauge;
 - the report of focus symbols that do not trade.
 """
@@ -37,6 +37,7 @@ from ..health import (
     now_ms,
 )
 from ..metrics import Statsd
+from ..rest import RestClient
 
 log = logging.getLogger(__name__)
 
@@ -72,9 +73,8 @@ class Collector:
         # latest mark price per symbol: depth is priced in USD at mark
         self._last_mark: dict[str, float] = {}
         self._bg: set[asyncio.Task] = set()
-        # The venue limits REST by IP, so a 429/418 is a pause for every REST
-        # caller here, not just the one that got it (monotonic seconds).
-        self._rest_pause_until = 0.0
+        # Every REST call goes through this; the subclass creates it.
+        self.rest: RestClient | None = None
 
         dcfg = cfg.get("depth", {})
         self.depth_prune_pct = float(dcfg.get("prune_pct", 10.0))
@@ -124,25 +124,8 @@ class Collector:
         self.sd.gauge(f"queue_rows.{ex}", self.sink.queued_rows())
         self.sd.gauge(f"insert_errors.{ex}", self.sink.insert_errors)
         self.sd.gauge(f"dropped_rows.{ex}", self.sink.dropped_rows)
-
-    # ------------------------------------------------------------------ rest
-
-    async def _rest_wait(self) -> None:
-        """Hold a REST call until any pause ordered by a 429/418 is over."""
-        while (left := self._rest_pause_until - time.monotonic()) > 0:
-            await asyncio.sleep(left)
-
-    def _rest_pause(self, stream: str, what: str, status: int, headers) -> None:
-        """Obey a 429/418 for every REST caller: venues turn requests sent
-        after a 429 into an IP ban, and a ban into a longer one."""
-        try:
-            wait = float(headers.get("Retry-After") or 60)
-        except ValueError:
-            wait = 60.0
-        self._rest_pause_until = max(self._rest_pause_until, time.monotonic() + wait)
-        self._event(stream, "rate_limit", f"{what} HTTP {status}, retry after {wait:.0f}s")
-        log.error("REST rate-limited (HTTP %d on %s), pausing all REST for %.0fs",
-                  status, what, wait)
+        if self.rest:
+            self.sd.gauge(f"rest_used_pct.{ex}", round(100 * self.rest.used() / self.rest.budget))
 
     # ------------------------------------------------------------ ws plumbing
 
@@ -357,3 +340,5 @@ class Collector:
             for t in [*tasks, *self._bg]:
                 t.cancel()
             await self._shutdown()
+            if self.rest:
+                await self.rest.close()

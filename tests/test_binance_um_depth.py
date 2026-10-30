@@ -7,6 +7,7 @@ try:
 except ModuleNotFoundError:  # only imported at module level, never used here
     sys.modules["websockets"] = types.ModuleType("websockets")
 
+import ingest.exchanges.binance_um as bu_um
 from ingest.exchanges.binance_um import BinanceUM
 from ingest.exchanges.binance_um_depth import ALIGNING, LIVE, SYNCING, DepthSync
 
@@ -244,11 +245,11 @@ def fetch(c, rest):
     async def go():
         real = asyncio.sleep
         def skip(*_):                           # skip backoff and Retry-After waits
-            c._rest_pause_until = 0.0
+            c.rest.pause_until = 0.0
             return real(0)
         asyncio.sleep = skip
         try:
-            c._rest, c._snap_sem = rest, asyncio.Semaphore(1)
+            c.rest._session, c._snap_sem = rest, asyncio.Semaphore(1)
             c._depth_open = True
             await c._fetch_snapshot(c.depth["BTCUSDT"])
         finally:
@@ -261,21 +262,12 @@ fetch(c, Rest(Resp(429, headers={"Retry-After": "7"}), Resp(200, SNAP)))
 check("429 logged with its wait", events(sink)[0], ("rate_limit", "BTCUSDT HTTP 429, retry after 7s"))
 check("then synced", (events(sink)[-1][0], c.depth["BTCUSDT"].live), ("synced", True))
 
-print("== connector: a 429 pauses every REST caller, not just the one that got it")
+print("== connector: snapshots draw on the collector's REST budget")
 c, sink = make()
-t = time.monotonic()
-c._rest_pause("depth", "BTCUSDT", 429, {"Retry-After": "7"})
-check("pause is shared and lasts Retry-After", round(c._rest_pause_until - t), 7)
-c._rest_pause("open_interest", "ETHUSDT", 418, {"Retry-After": "2"})
-check("a shorter pause does not cut a longer one", round(c._rest_pause_until - t), 7)
-c._rest_pause("depth", "BTCUSDT", 429, {"Retry-After": "soon"})
-check("unreadable Retry-After waits 60 s", round(c._rest_pause_until - t), 60)
-c._rest_pause_until = time.monotonic() + 0.2
-async def timed_wait():
-    t0 = time.monotonic(); await c._rest_wait(); return time.monotonic() - t0
-check("callers wait out the pause", asyncio.run(timed_wait()) >= 0.19, True)
-c._rest_pause_until = 0.0
-check("no pause, no wait", asyncio.run(timed_wait()) < 0.05, True)
+c.depth["BTCUSDT"].on_event(ev(99, 103, 98))
+fetch(c, Rest(Resp(200, SNAP, headers={"X-MBX-USED-WEIGHT-1M": "300"})))
+check("a 1000-level snapshot costs 20, Binance's count wins", (c.rest._local, c.rest.used()), (20, 300))
+check("weights by limit", [bu_um.depth_weight(n) for n in (5, 50, 100, 500, 1000)], [2, 2, 5, 10, 20])
 
 c, sink = make()
 sync = c.depth["BTCUSDT"]
@@ -317,7 +309,7 @@ c, sink = make()
 c.depth["BTCUSDT"].on_event(ev(99, 103, 98))
 rest = Rest(Resp(200, SNAP))
 async def fetch_closed():
-    c._rest, c._snap_sem = rest, asyncio.Semaphore(1)
+    c.rest._session, c._snap_sem = rest, asyncio.Semaphore(1)
     await c._fetch_snapshot(c.depth["BTCUSDT"])  # _depth_open is False
 asyncio.run(fetch_closed())
 check("a fetch gives up while the stream is closed", (rest.calls, c.depth["BTCUSDT"].live), (0, False))
@@ -360,7 +352,8 @@ async def fetch_shadow():
     real = asyncio.sleep
     asyncio.sleep = lambda *_: real(0)
     try:
-        c._rest, c._snap_sem, c._depth_open = Rest(Resp(200, FRESH2)), asyncio.Semaphore(1), True
+        c.rest._session, c._depth_open = Rest(Resp(200, FRESH2)), True
+        c._snap_sem = asyncio.Semaphore(1)
         await c._fetch_snapshot(sync.shadow, sync)
     finally:
         asyncio.sleep = real

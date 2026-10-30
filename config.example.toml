@@ -46,6 +46,11 @@ focus_symbols = [
 open_interest_poll_seconds = 60
 open_interest_symbols      = "focus"   # "focus" or "all"
 
+# REST request weight this collector may spend per minute: snapshots, the OI
+# poll, exchangeInfo. Binance allows 2400 per IP and counts everything sent
+# from it; the collector follows Binance's own count when it is higher.
+rest_weight_per_minute = 1200
+
 # Binance drops WebSocket connections after 24h. Beat it to the punch.
 # (Must stay above the first [binance_um.*] header: TOML would otherwise file
 # it under that table, where nothing reads it.)
