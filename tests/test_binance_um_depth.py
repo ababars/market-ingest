@@ -393,7 +393,7 @@ c2._emit_book_rows(SEC, time.monotonic())
 check("no books, no gauge", "book_not_ok_pct.binance_um" in c2.sd.gauges, False)
 
 print("== ws loop: on_open and on_close bracket every attempt")
-import ingest.exchanges.binance_um as bu
+import ingest.exchanges.base as bu   # the WS loop lives in the base class
 class WS:
     async def recv(self): raise RuntimeError("dropped")
 class Conn:

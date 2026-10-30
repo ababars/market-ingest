@@ -17,28 +17,15 @@ stream here runs under a stall watchdog rather than trusting "connected".
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import math
-import os
-import random
 import time
 
 import aiohttp
-import websockets
 
-from ..book import BANDS_PCT, empty_aggregate
+from ..health import StreamStats, ch_ts, now_ms
 from ..metrics import Statsd
+from .base import Collector, extra_fields as _extra
 from .binance_um_depth import SYNCING, DepthSync
-from ..health import (
-    RollingShare,
-    SequenceTracker,
-    StreamStats,
-    ch_ts,
-    connection_event,
-    new_session_id,
-    now_ms,
-)
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +33,6 @@ WS_MARKET = "wss://fstream.binance.com/market"
 WS_PUBLIC = "wss://fstream.binance.com/public"
 REST = "https://fapi.binance.com"
 EXCHANGE = "binance_um"
-# Window of the per-book quality share that the Netdata alarm watches.
-BOOK_QUALITY_WINDOW_S = 600
 
 # Fields we model explicitly. Anything else the exchange sends is preserved
 # verbatim in `extra` - Binance added `nq` and `ap` in the 2026 COIN-M merge,
@@ -57,28 +42,14 @@ KNOWN_AGG = {"e", "E", "s", "a", "p", "q", "f", "l", "T", "m", "M"}
 KNOWN_FORCE = {"s", "S", "o", "f", "q", "p", "ap", "X", "l", "z", "T"}
 
 
-def _extra(payload: dict, known: set[str]) -> str:
-    rest = {k: v for k, v in payload.items() if k not in known}
-    return json.dumps(rest, separators=(",", ":")) if rest else ""
+class BinanceUM(Collector):
+    EXCHANGE = EXCHANGE
 
-
-class BinanceUM:
     def __init__(self, cfg: dict, sink, *, focus: list[str], sd: Statsd) -> None:
-        self.sink = sink
-        self.sd = sd
-        self.cfg = cfg
-        self.focus = {s.upper() for s in focus}
-        self.session_id = new_session_id()
-        self.stall = cfg.get("stall_seconds", {})
-        self.reconnect_after = cfg.get("reconnect_after_hours", 23) * 3600
-
-        self.seq = SequenceTracker()
-        self.stats: dict[str, StreamStats] = {}
+        super().__init__(cfg, sink, focus=focus, sd=sd)
         # last mark-price observation per non-focus symbol, flushed once a minute
         self._pending_mark: dict[str, dict] = {}
         self._pending_minute: int = 0
-        # latest mark price per focus symbol: depth is priced in USD at mark
-        self._last_mark: dict[str, float] = {}
 
         # Order book (stream A of the early-collector spec): a local book per
         # symbol, written as one aggregate row per second. Off unless enabled.
@@ -87,150 +58,27 @@ class BinanceUM:
         syms = self.focus if syms == "focus" else {s.upper() for s in syms}
         self.depth_limit = int(dcfg.get("snapshot_limit", 1000))
         self.depth_speed_ms = int(dcfg.get("update_speed_ms", 100))
-        self.depth_prune_pct = float(dcfg.get("prune_pct", 10.0))
-        self.depth_stale_s = float(dcfg.get("stale_seconds", 5.0))
         self.depth_parallel = int(dcfg.get("max_parallel_snapshots", 2))
         # Refresh a book once either side keeps less than this share of the
         # coverage its snapshot had, but not more often than every N seconds.
         self.depth_refresh_ratio = float(dcfg.get("refresh_ratio", 0.5))
         self.depth_refresh_min_s = float(dcfg.get("refresh_min_seconds", 60.0))
-        self.depth: dict[str, DepthSync] = (
-            {s: DepthSync(s, self.depth_limit) for s in sorted(syms)}
-            if dcfg.get("enabled", False) else {}
-        )
-        # Seconds not `ok`, per book. The worst book is what gets published:
-        # one book broken all the time is 5 % of twenty, easy to miss in a sum.
-        self._book_quality = {s: RollingShare(BOOK_QUALITY_WINDOW_S) for s in self.depth}
-        self.collector_version = os.environ.get("COLLECTOR_VERSION", "")
+        if dcfg.get("enabled", False):
+            self._init_books({s: DepthSync(s, self.depth_limit) for s in sorted(syms)})
         self._rest: aiohttp.ClientSession | None = None
         self._snap_sem: asyncio.Semaphore | None = None
-        self._bg: set[asyncio.Task] = set()
         # True while the depth WebSocket is connected. A snapshot taken with no
         # stream behind it has no events to align with and is thrown away by
         # the reset at the next open - 20 weight per book, every start.
         self._depth_open = False
-        # Binance limits REST by IP, so a 429/418 is a pause for every REST
-        # caller here, not just the one that got it (monotonic seconds).
-        self._rest_pause_until = 0.0
-
-    # ------------------------------------------------------------------ util
-
-    async def _rest_wait(self) -> None:
-        """Hold a REST call until any pause ordered by a 429/418 is over."""
-        while (left := self._rest_pause_until - time.monotonic()) > 0:
-            await asyncio.sleep(left)
-
-    def _rest_pause(self, stream: str, what: str, status: int, headers) -> None:
-        """Obey a 429/418 for every REST caller: Binance turns requests sent
-        after a 429 into an IP ban, and a ban into a longer one."""
-        try:
-            wait = float(headers.get("Retry-After") or 60)
-        except ValueError:
-            wait = 60.0
-        self._rest_pause_until = max(self._rest_pause_until, time.monotonic() + wait)
-        self._event(stream, "rate_limit", f"{what} HTTP {status}, retry after {wait:.0f}s")
-        log.error("REST rate-limited (HTTP %d on %s), pausing all REST for %.0fs",
-                  status, what, wait)
-
-    def _stat(self, stream: str) -> StreamStats:
-        st = self.stats.get(stream)
-        if st is None:
-            st = self.stats[stream] = StreamStats(
-                exchange=EXCHANGE, connector=EXCHANGE, stream=stream,
-                session_id=self.session_id,
-            )
-        return st
-
-    def _event(self, stream: str, event: str, detail: str = "") -> None:
-        self.sink.write(
-            "ops.connection_events",
-            connection_event(
-                exchange=EXCHANGE, connector=EXCHANGE, stream=stream,
-                session_id=self.session_id, event=event, detail=detail,
-            ),
-        )
-
-    def _roll_health(self) -> None:
-        minute = int(time.time() // 60)
-        for st in self.stats.values():
-            row = st.roll(minute)
-            if row:
-                row["insert_errors"] = self.sink.insert_errors
-                self.sink.write("ops.stream_health", row)
-        # Sink health belongs on the same dashboard as throughput: a growing
-        # queue is the earliest visible sign that ClickHouse is in trouble.
-        self.sd.gauge(f"queue_rows.{EXCHANGE}", self.sink.queued_rows())
-        self.sd.gauge(f"insert_errors.{EXCHANGE}", self.sink.insert_errors)
-        self.sd.gauge(f"dropped_rows.{EXCHANGE}", self.sink.dropped_rows)
 
     # ------------------------------------------------------------ ws plumbing
 
-    async def _ws_loop(self, stream: str, url: str, handle, on_open=None, on_close=None) -> None:
-        """Connect, consume, and never give up. Backoff is exponential with
-        jitter so that a Binance-side outage does not turn our reconnects into
-        a self-inflicted IP ban. on_open runs on every (re)connect, before the
-        first message: state that does not survive a new connection is reset
-        there. on_close runs whenever an attempt ends, connected or not."""
-        attempt = 0
-        while True:
-            started = time.monotonic()
-            st = self._stat(stream)
-            try:
-                self._event(stream, "start", url)
-                async with websockets.connect(
-                    url, open_timeout=20, ping_interval=20, ping_timeout=20,
-                    max_size=16 * 1024 * 1024,
-                ) as ws:
-                    attempt = 0
-                    st.last_msg_monotonic = time.monotonic()
-                    self._event(stream, "open")
-                    log.info("%s connected", stream)
-                    if on_open:
-                        on_open()
-                    await self._consume(ws, stream, st, handle, started)
-            except asyncio.CancelledError:
-                self._event(stream, "stop")
-                raise
-            except Exception as exc:  # noqa: BLE001
-                self._event(stream, "error", f"{type(exc).__name__}: {exc}")
-                log.warning("%s error: %s", stream, exc)
-            finally:
-                if on_close:
-                    on_close()
-            # Keep the sequence state: the jump across this reconnect is the
-            # measurement of what the outage cost us.
-            self.seq.mark_reconnect()
-            attempt += 1
-            delay = min(60.0, (2 ** min(attempt, 6)) * 0.5) * (0.5 + random.random())
-            self._event(stream, "reconnect", f"attempt={attempt} in {delay:.1f}s")
-            await asyncio.sleep(delay)
-
-    async def _consume(self, ws, stream: str, st: StreamStats, handle, started: float) -> None:
-        stall_after = float(self.stall.get(stream, 300))
-        while True:
-            if time.monotonic() - started > self.reconnect_after:
-                # Binance force-closes at 24h. Rotating first turns an abrupt
-                # drop into a controlled handover.
-                self._event(stream, "close", "scheduled rotation before 24h limit")
-                return
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            except asyncio.TimeoutError:
-                if st.silent_for() > stall_after:
-                    self._event(
-                        stream, "stall",
-                        f"no messages for {st.silent_for():.0f}s (limit {stall_after:.0f}s)",
-                    )
-                    log.error("%s stalled for %.0fs, reconnecting", stream, st.silent_for())
-                    return
-                self._roll_health()
-                continue
-            recv_ms = now_ms()
-            payload = json.loads(raw)
-            if isinstance(payload, dict) and "data" in payload and "stream" in payload:
-                payload = payload["data"]
-            handle(payload, recv_ms, len(raw), st)
-            self._roll_health()
+    def _unwrap(self, payload):
+        """Combined streams (/stream?streams=) wrap each message."""
+        if isinstance(payload, dict) and "data" in payload and "stream" in payload:
+            return payload["data"]
+        return payload
 
     # -------------------------------------------------------------- handlers
 
@@ -352,11 +200,6 @@ class BinanceUM:
         self.sd.incr(f"bytes.{EXCHANGE}.force_order", nbytes)
 
     # ----------------------------------------------------------- order book
-
-    def _depth_resync(self, sync: DepthSync, reason: str) -> None:
-        self._event("depth", "resync", f"{sync.symbol}: {reason}")
-        log.warning("%s depth resync: %s", sync.symbol, reason)
-        self.sd.incr(f"resyncs.{EXCHANGE}.depth", 1)
 
     def _depth_report(self, sync: DepthSync) -> None:
         """Log what DepthSync flagged since the last call."""
@@ -494,7 +337,7 @@ class BinanceUM:
             await asyncio.sleep(delay)
             delay = min(30.0, delay * 2)
 
-    def _depth_maybe_refresh(self, sync: DepthSync, agg: dict, mono: float) -> None:
+    def _book_measured(self, sync: DepthSync, agg: dict, mono: float) -> None:
         """Start a refresh once the snapshot's reach has worn thin on either
         side. The first aggregate of a fresh book records what a snapshot
         reaches for this symbol; later ones are measured against it, so a book
@@ -511,72 +354,6 @@ class BinanceUM:
             self._event("depth", "refresh",
                         f"{sync.symbol} started: covered {bid:.3f}/{ask:.3f}% "
                         f"of {bid0:.3f}/{ask0:.3f}% at snapshot")
-
-    def _emit_book_rows(self, second: int, mono: float) -> None:
-        """One market.book_agg row per book for the second ending at `second`.
-
-        A row is written for every book every second, valid or not: a second
-        without a usable book is recorded as such (state=resync, zeros, every
-        band invalid), so the archive never has to be read for silence."""
-        ingest = ch_ts(now_ms())
-        event_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(second))
-        not_ok = 0
-        for sync in self.depth.values():
-            counters = sync.take_second()
-            agg = None
-            if sync.live:
-                sync.book.prune(self.depth_prune_pct)
-                if sync.book.crossed():
-                    self._depth_resync(sync, sync.reset("crossed book"))
-                else:
-                    agg = sync.book.aggregate(BANDS_PCT, mark=self._last_mark.get(sync.symbol))
-                    if agg is None:
-                        # live but a side is empty: nothing to measure, and no
-                        # delta will refill a side the book has lost track of
-                        self._depth_resync(sync, sync.reset("empty side"))
-                    else:
-                        self._depth_maybe_refresh(sync, agg, mono)
-            if agg is None:
-                state = "resync"
-            elif counters["resynced"] or not agg["covered_bid_pct"] or not agg["covered_ask_pct"]:
-                # resynced within the second, or price has left the range the
-                # snapshot covered: the numbers exist but are not the whole truth
-                state = "degraded"
-            elif mono - sync.last_applied_mono > self.depth_stale_s:
-                state = "stale"
-            else:
-                state = "ok"
-            not_ok += state != "ok"
-            self._book_quality[sync.symbol].add(state != "ok")
-            row = {
-                "exchange": EXCHANGE,
-                "symbol": sync.symbol,
-                "event_time": event_time,
-                "ingest_time": ingest,
-                "last_update_time": ch_ts(sync.last_event_ms),
-                "seq_first": counters["seq_first"],
-                "seq_last": counters["seq_last"],
-                "n_updates": counters["n_updates"],
-                "state": state,
-                "collector_version": self.collector_version,
-            }
-            row.update(agg or empty_aggregate(BANDS_PCT))
-            self.sink.write("market.book_agg", row)
-        self.sd.incr(f"rows.{EXCHANGE}.book_agg", len(self.depth))
-        self.sd.gauge(f"book_not_ok.{EXCHANGE}", not_ok)
-        if self._book_quality:
-            self.sd.gauge(f"book_not_ok_pct.{EXCHANGE}",
-                          round(max(q.pct() for q in self._book_quality.values()), 2))
-
-    async def _depth_tick_loop(self) -> None:
-        """Fires just after each wall-clock second. The clock is the local one,
-        kept honest by chrony; a second the loop oversleeps is skipped rather
-        than invented, because the book's state at that instant is gone."""
-        while True:
-            now = time.time()
-            boundary = math.floor(now) + 1
-            await asyncio.sleep(boundary - now + 0.05)
-            self._emit_book_rows(int(boundary), time.monotonic())
 
     # ---------------------------------------------------------- open interest
 
@@ -625,14 +402,7 @@ class BinanceUM:
     # ------------------------------------------------------- config validation
 
     async def _validate_focus(self) -> None:
-        """Check every configured focus symbol actually trades.
-
-        A delisted or settling symbol is the quietest possible failure: it is
-        spelled correctly, the subscription is accepted, and it simply never
-        produces a row. Caught in the field with TONUSDT, whose status had moved
-        to SETTLING - the collector looked perfectly healthy while silently
-        covering 19 symbols instead of 20.
-        """
+        """Check every configured focus symbol actually trades."""
         timeout = aiohttp.ClientTimeout(total=30)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
@@ -643,70 +413,52 @@ class BinanceUM:
             self._event("config", "error", f"exchangeInfo unavailable: {exc}")
             log.warning("could not validate focus symbols: %s", exc)
             return
-
-        status = {d["symbol"]: d.get("status", "") for d in info.get("symbols", [])}
-        for sym in sorted(self.focus):
-            st = status.get(sym)
-            if st is None:
-                self._event("config", "error", f"{sym} does not exist on {EXCHANGE}")
-                log.error("focus symbol %s does not exist on this venue", sym)
-            elif st != "TRADING":
-                self._event("config", "error", f"{sym} status={st}, expect no data")
-                log.error("focus symbol %s is %s, not TRADING - it will produce no data", sym, st)
-        tradable = sum(1 for s in self.focus if status.get(s) == "TRADING")
-        self._event("config", "subscribed", f"{tradable}/{len(self.focus)} focus symbols tradable")
-        log.info("focus universe: %d/%d symbols tradable", tradable, len(self.focus))
+        self._report_focus({d["symbol"]: d.get("status", "") for d in info.get("symbols", [])},
+                           "TRADING")
 
     # -------------------------------------------------------------------- run
 
-    async def run(self) -> None:
-        # Publish the quality counters at zero from the start, so their charts
-        # and the alarms watching them exist before anything goes wrong.
-        self.sd.prime(
+    def _primed_counters(self) -> list[str]:
+        names = [
             f"gaps.{EXCHANGE}.agg_trade",
             f"rows.{EXCHANGE}.agg_trade",
             f"rows.{EXCHANGE}.mark_price",
             f"rows.{EXCHANGE}.force_order",
             f"rows.{EXCHANGE}.open_interest",
-        )
-        if self.depth:
-            self.sd.prime(f"rows.{EXCHANGE}.book_agg", f"resyncs.{EXCHANGE}.depth",
-                          f"refreshes.{EXCHANGE}.depth")
-        await self._validate_focus()
-        focus_streams = "/".join(f"{s.lower()}@aggTrade" for s in sorted(self.focus))
-        tasks = [
-            asyncio.create_task(
-                self._ws_loop("mark_price", f"{WS_MARKET}/ws/!markPrice@arr@1s", self._handle_mark),
-                name="mark_price"),
-            asyncio.create_task(
-                self._ws_loop("agg_trade", f"{WS_MARKET}/stream?streams={focus_streams}", self._handle_agg),
-                name="agg_trade"),
-            asyncio.create_task(
-                self._ws_loop("force_order", f"{WS_MARKET}/ws/!forceOrder@arr", self._handle_force),
-                name="force_order"),
-            asyncio.create_task(self._open_interest_loop(), name="open_interest"),
         ]
+        if self.depth:
+            names.append(f"refreshes.{EXCHANGE}.depth")
+        return names + super()._primed_counters()
+
+    async def _startup(self) -> None:
+        await self._validate_focus()
+        if self.depth:
+            self._rest = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+            self._snap_sem = asyncio.Semaphore(self.depth_parallel)
+
+    async def _shutdown(self) -> None:
+        if self._rest:
+            await self._rest.close()
+
+    def _coroutines(self) -> dict:
+        focus_streams = "/".join(f"{s.lower()}@aggTrade" for s in sorted(self.focus))
+        work = {
+            "mark_price": self._ws_loop(
+                "mark_price", f"{WS_MARKET}/ws/!markPrice@arr@1s", self._handle_mark),
+            "agg_trade": self._ws_loop(
+                "agg_trade", f"{WS_MARKET}/stream?streams={focus_streams}", self._handle_agg),
+            "force_order": self._ws_loop(
+                "force_order", f"{WS_MARKET}/ws/!forceOrder@arr", self._handle_force),
+            "open_interest": self._open_interest_loop(),
+        }
         if self.depth:
             # Separate connection on /public: depth is not served on /market,
             # and a stream on the wrong route is accepted and stays silent.
-            self._rest = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
-            self._snap_sem = asyncio.Semaphore(self.depth_parallel)
             depth_streams = "/".join(f"{s.lower()}@depth@{self.depth_speed_ms}ms"
                                      for s in self.depth)
-            tasks += [
-                asyncio.create_task(
-                    self._ws_loop("depth", f"{WS_PUBLIC}/stream?streams={depth_streams}",
-                                  self._handle_depth, on_open=self._depth_on_open,
-                                  on_close=self._depth_on_close),
-                    name="depth"),
-                asyncio.create_task(self._depth_snapshot_loop(), name="depth_snapshots"),
-                asyncio.create_task(self._depth_tick_loop(), name="depth_tick"),
-            ]
+            work["depth"] = self._ws_loop(
+                "depth", f"{WS_PUBLIC}/stream?streams={depth_streams}", self._handle_depth,
+                on_open=self._depth_on_open, on_close=self._depth_on_close)
+            work["depth_snapshots"] = self._depth_snapshot_loop()
             log.info("order book: %d symbols at %d ms", len(self.depth), self.depth_speed_ms)
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            for t in [*tasks, *self._bg]:
-                t.cancel()
-            if self._rest:
-                await self._rest.close()
+        return work
