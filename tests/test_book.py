@@ -132,6 +132,24 @@ real, empty = book(limit=5).aggregate(), empty_aggregate()
 check("same keys", set(real) ^ set(empty), set())
 check("all zero", {v for v in empty.values()}, {0})
 
+print("== absorb: a refreshed book keeps what the old one knew")
+old = book(uid=10)                                      # trusted 97.0 .. 103.0
+old.apply([["95.0", "2"], ["94.0", "1"], ["99.7", "5"]], [["104.0", "3"]], 11)
+fresh = book(bids=[["99.9", "1"], ["99.6", "1"]], asks=ASKS + [["103.5", "1"]], uid=10)
+fresh.apply([["95.0", "9"]], [], 11)                    # trusted 99.6 .. 103.5
+fresh.absorb(old)
+check("old book's trusted levels taken", [p in fresh.bids for p in (99.0, 98.5, 97.0)], [True] * 3)
+check("far levels it learned taken", (fresh.bids.get(94.0), fresh.asks.get(104.0)), (1.0, 3.0))
+check("a level the fresh book knows is kept", fresh.bids[95.0], 9.0)
+check("nothing taken inside the fresh trusted range", 99.7 in fresh.bids, False)
+check("trusted range is the union", (fresh.bid_floor, fresh.ask_ceil), (97.0, 103.5))
+close("coverage reflects it", fresh.aggregate()["covered_bid_pct"], 3.0)
+try:
+    book(uid=10).absorb(book(uid=11)); got = None
+except ValueError:
+    got = "refused"
+check("books on different update ids are refused", got, "refused")
+
 print("== determinism: same levels, same row, whatever the arrival order")
 a = book(limit=5)
 z = book(bids=list(reversed(BIDS)), asks=list(reversed(ASKS)), limit=5)

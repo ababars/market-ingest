@@ -347,9 +347,9 @@ class BinanceUM(Collector):
 
     def _book_measured(self, sync: DepthSync, agg: dict, mono: float) -> None:
         """Start a refresh once the snapshot's reach has worn thin on either
-        side. The first aggregate of a fresh book records what a snapshot
-        reaches for this symbol; later ones are measured against it, so a book
-        whose snapshot spans +-10 % is not refreshed every time BTC's would be."""
+        side. The first aggregate of a fresh or refreshed book records how far
+        it reaches for this symbol; later ones are measured against it, so a
+        book whose snapshot spans +-10 % is not refreshed every time BTC's would be."""
         bid, ask = agg["covered_bid_pct"], agg["covered_ask_pct"]
         if sync.cover0 is None:
             sync.cover0 = (bid, ask)

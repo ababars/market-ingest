@@ -84,6 +84,32 @@ class LocalBook:
         _apply_side(self.asks, asks)
         self.last_update_id = update_id
 
+    def absorb(self, older: "LocalBook") -> None:
+        """Take over what an older book of the same symbol knows and this one
+        does not. Used when a refresh swaps a fresh book in: without it every
+        refresh would throw away the far levels the old book had learned.
+
+        Both books must stand on the same update id, i.e. both have applied
+        every event since this one's snapshot. Deltas report every change, so
+        any level a live book holds is exact; the books can only differ in
+        what they have not heard of. Hence:
+        - a price this book holds is never replaced: it is as fresh as it gets;
+        - inside this book's trusted range nothing is taken: a price missing
+          there is an empty level, not an unknown one;
+        - outside it, a price only the older book holds is taken over;
+        - each book is complete inside its own trusted range, so the merged
+          book is complete inside their union."""
+        if older.last_update_id != self.last_update_id:
+            raise ValueError("books are on different update ids")
+        for p, q in older.bids.items():
+            if p < self.bid_floor:
+                self.bids.setdefault(p, q)
+        for p, q in older.asks.items():
+            if p > self.ask_ceil:
+                self.asks.setdefault(p, q)
+        self.bid_floor = min(self.bid_floor, older.bid_floor)
+        self.ask_ceil = max(self.ask_ceil, older.ask_ceil)
+
     def invalidate(self) -> None:
         """Forget everything. Called on a sequence break, so that a stale
         book can never be aggregated by mistake while the resync is pending."""

@@ -361,6 +361,7 @@ asyncio.run(fetch_shadow())
 check("swapped in, logged as refresh done", events(sink)[-1], ("refresh", "BTCUSDT done: u=106"))
 check("no resync anywhere", [e for e, _ in events(sink) if e == "resync"], [])
 check("reach renewed", (sync.shadow, sync.book.ask_ceil), (None, 102.5))
+check("and the old book's bid reach kept", (sync.book.bid_floor, 99.0 in sync.book.bids), (99.0, True))
 c._emit_book_rows(SEC + 2, M0 + 2)
 row = sink.of("market.book_agg")[-1]
 check("next row ok, ask coverage back", (row["state"], round(row["covered_ask_pct"], 2)), ("ok", 1.84))
