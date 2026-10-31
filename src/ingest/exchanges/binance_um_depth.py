@@ -55,6 +55,9 @@ class DepthSync:
         self.resyncs = 0
         self.last_event_ms = 0.0      # exchange transaction time of the last applied event
         self.last_applied_mono = 0.0  # local monotonic time of the last applied event
+        # When the book last went live from a snapshot. A refresh swap keeps
+        # it: the book keeps what it had learned, so it does not get younger.
+        self.live_since_mono = 0.0
         # Flags for the connector to log and clear: the book went live, or a
         # refresh was swapped in. Kept here so this class stays free of I/O.
         self.just_live = False
@@ -176,6 +179,7 @@ class DepthSync:
                 return self.reset(f"gap after snapshot: U={first_id} > lastUpdateId={book_id}")
             self.state = LIVE               # U <= lastUpdateId <= u
             self.just_live = True
+            self.live_since_mono = mono
         else:
             if last_id <= book_id:
                 return None                 # already applied (redelivery)

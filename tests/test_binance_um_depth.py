@@ -166,7 +166,7 @@ c, sink = make()
 c._emit_book_rows(SEC, time.monotonic())
 row = sink.of("market.book_agg")[-1]
 check("no snapshot yet: state resync", row["state"], "resync")
-check("zeros, not missing", (row["best_bid"], row["depth_bid_usd_1"], row["band_valid_bid_0p2"]), (0.0, 0.0, 0))
+check("zeros, not missing", (row["best_bid"], row["depth_bid_usd_1"], row["book_age_s"]), (0.0, 0, 0))
 check("event_time is the second", row["event_time"], "2026-09-10 08:45:00")
 
 sync = c.depth["BTCUSDT"]
@@ -182,6 +182,7 @@ c._emit_book_rows(SEC + 2, time.monotonic())
 check("depth priced at mark", sink.of("market.book_agg")[-1]["depth_bid_usd_1"], 4 * 200.0)
 c._emit_book_rows(SEC + 3, time.monotonic() + 60)
 check("no delta for too long: stale", sink.of("market.book_agg")[-1]["state"], "stale")
+check("book age counts from going live", 59 <= sink.of("market.book_agg")[-1]["book_age_s"] <= 61, True)
 
 print("== connector: resyncs are logged and visible in the rows")
 feed(c, ev(110, 112, 109))
@@ -348,6 +349,7 @@ c._emit_book_rows(SEC + 1, M0 + 1)
 feed(c, ev(106, 106, 105))
 FRESH2 = {"lastUpdateId": 106, "bids": [["100.6", "1"], ["100.0", "1"], ["99.5", "1"]],
           "asks": [["100.7", "1"], ["101.0", "1"], ["102.5", "1"]]}
+born = sync.live_since_mono
 async def fetch_shadow():
     real = asyncio.sleep
     asyncio.sleep = lambda *_: real(0)
@@ -361,6 +363,7 @@ asyncio.run(fetch_shadow())
 check("swapped in, logged as refresh done", events(sink)[-1], ("refresh", "BTCUSDT done: u=106"))
 check("no resync anywhere", [e for e, _ in events(sink) if e == "resync"], [])
 check("reach renewed", (sync.shadow, sync.book.ask_ceil), (None, 102.5))
+check("a refresh does not make the book younger", sync.live_since_mono, born)
 check("and the old book's bid reach kept", (sync.book.bid_floor, 99.0 in sync.book.bids), (99.0, True))
 c._emit_book_rows(SEC + 2, M0 + 2)
 row = sink.of("market.book_agg")[-1]

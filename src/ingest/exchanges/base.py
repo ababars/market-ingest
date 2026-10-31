@@ -80,8 +80,9 @@ class Collector:
         self.depth_prune_pct = float(dcfg.get("prune_pct", 10.0))
         self.depth_stale_s = float(dcfg.get("stale_seconds", 5.0))
         # Books by symbol. Each is an object with: symbol, live, book
-        # (a LocalBook), last_applied_mono, last_event_ms, take_second() and
-        # reset(reason) -> reason. Empty unless the subclass enables depth.
+        # (a LocalBook), last_applied_mono, live_since_mono, last_event_ms,
+        # take_second() and reset(reason) -> reason. Empty unless the
+        # subclass enables depth.
         self.depth: dict = {}
         self._book_quality: dict[str, RollingShare] = {}
 
@@ -218,8 +219,8 @@ class Collector:
         """One market.book_agg row per book for the second ending at `second`.
 
         A row is written for every book every second, valid or not: a second
-        without a usable book is recorded as such (state=resync, zeros, every
-        band invalid), so the archive never has to be read for silence."""
+        without a usable book is recorded as such (state=resync, zeros), so the
+        archive never has to be read for silence."""
         ex = self.EXCHANGE
         ingest = ch_ts(now_ms())
         event_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(second))
@@ -262,6 +263,10 @@ class Collector:
                 "seq_first": counters["seq_first"],
                 "seq_last": counters["seq_last"],
                 "n_updates": counters["n_updates"],
+                # Depth beyond the snapshot is learned from deltas over time, so
+                # the first minutes of a book understate it; this lets a reader
+                # cut them out.
+                "book_age_s": max(0, int(mono - sync.live_since_mono)) if sync.live else 0,
                 "state": state,
                 "collector_version": self.collector_version,
             }
