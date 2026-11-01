@@ -40,6 +40,9 @@ class DepthSync:
     # events at 100 ms. The cap only matters if the REST side is stuck; then
     # the oldest events are the ones a late snapshot would discard anyway.
     MAX_BUFFER = 5000
+    # Deltas add levels at any distance and nothing removes them: the
+    # collector has to prune.
+    bounded = False
 
     def __init__(self, symbol: str, depth_limit: int = 1000) -> None:
         self.symbol = symbol

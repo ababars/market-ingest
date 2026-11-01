@@ -8,7 +8,7 @@ difference in the archive:
 
 - ops.connection_events and ops.stream_health rows, and the StatsD gauges;
 - the WebSocket loop: backoff, stall watchdog, rotation before a forced close;
-- one REST client (self.rest): a shared weight budget and one pause after a 429/418;
+- one REST client (self.rest): a shared request budget and one pause when limited;
 - one market.book_agg row per book per second, and the book quality gauge;
 - the report of focus symbols that do not trade.
 """
@@ -73,6 +73,9 @@ class Collector:
         # latest mark price per symbol: depth is priced in USD at mark
         self._last_mark: dict[str, float] = {}
         self._bg: set[asyncio.Task] = set()
+        # The open connection of each stream, while it is open. A venue that
+        # subscribes by message needs it to resubscribe one topic in place.
+        self._ws: dict[str, object] = {}
         # Every REST call goes through this; the subclass creates it.
         self.rest: RestClient | None = None
 
@@ -81,8 +84,9 @@ class Collector:
         self.depth_stale_s = float(dcfg.get("stale_seconds", 5.0))
         # Books by symbol. Each is an object with: symbol, live, book
         # (a LocalBook), last_applied_mono, live_since_mono, last_event_ms,
-        # take_second() and reset(reason) -> reason. Empty unless the
-        # subclass enables depth.
+        # take_second() and reset(reason) -> reason, and `bounded`: True when
+        # the venue itself keeps the book to its top N levels, so there is
+        # nothing to prune. Empty unless the subclass enables depth.
         self.depth: dict = {}
         self._book_quality: dict[str, RollingShare] = {}
 
@@ -143,12 +147,19 @@ class Collector:
 
     async def _ws_loop(self, stream: str, url: str, handle,
                        on_open: Callable[[], None] | None = None,
-                       on_close: Callable[[], None] | None = None) -> None:
+                       on_close: Callable[[], None] | None = None,
+                       subscribe: list[str] | None = None,
+                       app_ping: tuple[float, str] | None = None) -> None:
         """Connect, consume, and never give up. Backoff is exponential with
         jitter so that a venue-side outage does not turn our reconnects into
         a self-inflicted IP ban. on_open runs on every (re)connect, before the
         first message: state that does not survive a new connection is reset
-        there. on_close runs whenever an attempt ends, connected or not."""
+        there. on_close runs whenever an attempt ends, connected or not.
+
+        subscribe: messages sent right after on_open, for venues that take
+        subscriptions as messages rather than in the URL. app_ping: (interval,
+        message) for venues that want a ping of their own on top of the
+        WebSocket one (Bybit drops a connection without it)."""
         attempt = 0
         while True:
             started = time.monotonic()
@@ -163,9 +174,12 @@ class Collector:
                     st.last_msg_monotonic = time.monotonic()
                     self._event(stream, "open")
                     log.info("%s connected", stream)
+                    self._ws[stream] = ws
                     if on_open:
                         on_open()
-                    await self._consume(ws, stream, st, handle, started)
+                    for msg in subscribe or ():
+                        await ws.send(msg)
+                    await self._consume(ws, stream, st, handle, started, app_ping)
             except asyncio.CancelledError:
                 self._event(stream, "stop")
                 raise
@@ -173,6 +187,7 @@ class Collector:
                 self._event(stream, "error", f"{type(exc).__name__}: {exc}")
                 log.warning("%s error: %s", stream, exc)
             finally:
+                self._ws.pop(stream, None)
                 if on_close:
                     on_close()
             # Keep the sequence state: the jump across this reconnect is the
@@ -183,9 +198,14 @@ class Collector:
             self._event(stream, "reconnect", f"attempt={attempt} in {delay:.1f}s")
             await asyncio.sleep(delay)
 
-    async def _consume(self, ws, stream: str, st: StreamStats, handle, started: float) -> None:
+    async def _consume(self, ws, stream: str, st: StreamStats, handle, started: float,
+                       app_ping: tuple[float, str] | None = None) -> None:
         stall_after = float(self.stall.get(stream, 300))
+        last_ping = time.monotonic()
         while True:
+            if app_ping and time.monotonic() - last_ping >= app_ping[0]:
+                await ws.send(app_ping[1])
+                last_ping = time.monotonic()
             if time.monotonic() - started > self.reconnect_after:
                 # Venues force-close long-lived connections (Binance at 24h).
                 # Rotating first turns an abrupt drop into a controlled one.
@@ -204,7 +224,9 @@ class Collector:
                 self._roll_health()
                 continue
             recv_ms = now_ms()
-            handle(self._unwrap(json.loads(raw)), recv_ms, len(raw), st)
+            payload = self._unwrap(json.loads(raw))
+            if payload is not None:     # None: a control message, already handled
+                handle(payload, recv_ms, len(raw), st)
             self._roll_health()
 
     # ----------------------------------------------------------- order book
@@ -236,7 +258,8 @@ class Collector:
             counters = sync.take_second()
             agg = None
             if sync.live:
-                sync.book.prune(self.depth_prune_pct)
+                if not sync.bounded:
+                    sync.book.prune(self.depth_prune_pct)
                 if sync.book.crossed():
                     self._depth_resync(sync, sync.reset("crossed book"))
                 else:

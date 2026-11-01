@@ -1,13 +1,14 @@
 """One REST client per venue.
 
 Venues limit REST by IP, not by connection, so every REST caller in a
-collector has to draw on one budget and stop together after a 429/418:
+collector has to draw on one budget and stop together once the venue says stop:
 
 - one HTTP session, so keep-alive is shared and nothing opens its own;
 - a request-weight budget per fixed window (Binance: per clock minute). The
   venue's own count, when it sends one in a header, wins over ours: it also
   sees other processes on the same IP;
-- one pause for every caller after a 429/418, as long as Retry-After asks.
+- one pause for every caller after a limit response (Binance 429/418, Bybit
+  403), as long as Retry-After asks or, without it, default_pause_s.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ log = logging.getLogger(__name__)
 
 
 class RateLimited(Exception):
-    """The venue answered 429/418. The pause is already in force."""
+    """The venue answered with a limit status. The pause is already in force."""
 
 
 class HttpError(Exception):
@@ -35,7 +36,7 @@ class HttpError(Exception):
 class RestClient:
     def __init__(self, base_url: str, *, budget: int, window_s: float = 60.0,
                  used_header: str | None = None, limited_statuses=(418, 429),
-                 timeout_s: float = 20.0,
+                 timeout_s: float = 20.0, default_pause_s: float = 60.0,
                  on_event: Callable[[str, str, str], None] | None = None,
                  wall: Callable[[], float] = time.time) -> None:
         self.base_url = base_url.rstrip("/")
@@ -46,6 +47,8 @@ class RestClient:
         self.timeout = aiohttp.ClientTimeout(total=timeout_s)
         self.on_event = on_event
         self.wall = wall
+        # How long to stop after a limit response without Retry-After
+        self.default_pause_s = default_pause_s
         self._session: aiohttp.ClientSession | None = None
         # FIFO: whoever waits for the budget first is served first
         self._lock = asyncio.Lock()
@@ -101,12 +104,12 @@ class RestClient:
         self._server = max(self._server, v)
 
     def pause(self, stream: str, what: str, status: int, headers) -> None:
-        """Obey a 429/418 for every caller: venues turn requests sent after a
-        429 into an IP ban, and a ban into a longer one."""
+        """Obey a limit response for every caller: venues turn requests sent
+        after one into an IP ban, and a ban into a longer one."""
         try:
-            wait = float(headers.get("Retry-After") or 60)
+            wait = float(headers.get("Retry-After") or self.default_pause_s)
         except ValueError:
-            wait = 60.0
+            wait = self.default_pause_s
         self.pause_until = max(self.pause_until, time.monotonic() + wait)
         if self.on_event:
             self.on_event(stream, "rate_limit", f"{what} HTTP {status}, retry after {wait:.0f}s")
@@ -120,7 +123,7 @@ class RestClient:
                   still_wanted: Callable[[], bool] | None = None):
         """GET and decode JSON. Returns None, spending nothing, if
         still_wanted() turns false while the call waits for its turn.
-        Raises RateLimited on 429/418 and HttpError on any other non-200."""
+        Raises RateLimited on a limit status and HttpError on any other non-200."""
         if not await self._acquire(weight, still_wanted):
             return None
         if self._session is None:

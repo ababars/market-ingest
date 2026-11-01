@@ -30,6 +30,7 @@ from .metrics import Statsd
 # on demand, so a broken connector cannot stop the others from starting.
 EXCHANGES = {
     "binance_um": "ingest.exchanges.binance_um:BinanceUM",
+    "bybit_linear": "ingest.exchanges.bybit_linear:BybitLinear",
 }
 
 
