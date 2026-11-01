@@ -14,8 +14,9 @@ Streams keep Binance's names (agg_trade, mark_price, force_order, depth,
 open_interest), so ops tables and alarms read the same for every venue:
 
     agg_trade      publicTrade.<sym>      every trade, id is a UUID
-    mark_price     tickers.<sym>          deltas carry only what changed; one
-                                          row a second from the merged state
+    mark_price     tickers.<sym>          deltas carry only what changed; a timer
+                                          writes one row a second per symbol from
+                                          the merged state
     force_order    allLiquidation.<sym>   every liquidation, not a sample
     depth          orderbook.1000.<sym>   snapshot + deltas on the socket
     open_interest  GET /v5/market/tickers once a minute: OI for the focus
@@ -45,6 +46,13 @@ PING = (20.0, json.dumps({"op": "ping"}))
 # Bybit's own limit is 10 args per message on spot only; small messages are
 # also kinder to the reply, which reports success for the whole message.
 SUBSCRIBE_CHUNK = 10
+
+# A focus symbol whose ticker has been silent this long gets no mark rows: the
+# gap is then in the archive instead of a state nobody has confirmed.
+MARK_MAX_AGE_MS = 60_000
+# Rows are cut this long after the second ends, so that messages stamped inside
+# it have arrived.
+MARK_SETTLE_S = 0.05
 
 KNOWN_TRADE = {"T", "s", "S", "v", "p", "i", "seq"}
 # S stays in extra: it is Bybit's position side, kept as sent; `side` holds
@@ -77,7 +85,7 @@ class BybitLinear(Collector):
         # Ticker state per focus symbol: deltas carry only the fields that
         # changed, so every value is read from the merged state.
         self._tickers: dict[str, dict] = {}
-        self._mark_second: dict[str, int] = {}
+        self._ticker_ts: dict[str, float] = {}   # exchange time of the last message
 
         dcfg = cfg.get("depth", {})
         syms = dcfg.get("symbols", "focus")
@@ -154,24 +162,52 @@ class BybitLinear(Collector):
             self._tickers[sym].update(d)
         state = self._tickers[sym]
         ts = float(payload.get("ts") or recv_ms)
-        rows = 0
+        self._ticker_ts[sym] = ts
         mark = _f(state.get("markPrice"))
         if mark:
             self._last_mark[sym] = mark
-        # One row per second, the merged state as of the first message in it:
-        # the same cadence as Binance's markPrice@1s. The ticker pushes every
-        # 100 ms, mostly for best bid and ask, and leaves the mark out of a
-        # delta while it has not moved - a row per change would make an
-        # unchanged mark look like a gap.
-        second = int(ts // 1000)
-        if mark and self._mark_second.get(sym) != second:
-            self._mark_second[sym] = second
-            self.sink.write("market.mark_price", self._mark_row(state, ts, recv_ms, sampled=0))
-            rows = 1
-            self._count_rows("mark_price", 1)
-        st.observe(nbytes=nbytes, rows=rows, lag_ms=int(recv_ms - ts), symbol=sym)
+        # No row here: the ticker pushes every 100 ms, mostly for best bid and
+        # ask, and leaves the mark out of a delta while it has not moved. The
+        # rows are cut by _mark_loop, one per second.
+        st.observe(nbytes=nbytes, rows=0, lag_ms=int(recv_ms - ts), symbol=sym)
         self.sd.incr(f"bytes.{EXCHANGE}.mark_price", nbytes)
         self.sd.gauge(f"lag_ms.{EXCHANGE}.mark_price", max(0, int(recv_ms - ts)))
+
+    def _mark_reset(self) -> None:
+        """On close and on open: while the socket is down nothing confirms the
+        merged state, so the timer writes no rows - a gap in the archive, not
+        an old mark passed off as current. The next connection starts with a
+        snapshot per symbol."""
+        self._tickers.clear()
+        self._ticker_ts.clear()
+
+    async def _mark_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0 - time.time() % 1.0 + MARK_SETTLE_S)
+            self._mark_pass(int(time.time()), now_ms())
+
+    def _mark_pass(self, second: int, recv_ms: float) -> int:
+        """One mark row per focus symbol for the second that just ended, from
+        the merged ticker state - the cadence of Binance's markPrice@1s, so an
+        unchanged mark is a row and not a gap. When the last message is older
+        than a second the row is carried forward, and extra holds the time of
+        that message."""
+        at = second * 1000.0
+        n = 0
+        for sym, state in self._tickers.items():
+            last = self._ticker_ts.get(sym, 0.0)
+            if not _f(state.get("markPrice")) or at - last > MARK_MAX_AGE_MS:
+                continue
+            row = self._mark_row(state, at, recv_ms, sampled=0)
+            if at - last >= 1000:
+                row["extra"] = json.dumps({"ts": int(last)}, separators=(",", ":"))
+            self.sink.write("market.mark_price", row)
+            n += 1
+        if n:
+            # rows only: observe() would count it as a message and hide a stall
+            self._stat("mark_price").rows += n
+            self._count_rows("mark_price", n)
+        return n
 
     def _mark_row(self, t: dict, ts: float, recv_ms: float, sampled: int) -> dict:
         return {
@@ -387,7 +423,9 @@ class BybitLinear(Collector):
     def _coroutines(self) -> dict:
         work = {
             "agg_trade": self._stream("agg_trade", "publicTrade", self.focus, self._handle_trade),
-            "mark_price": self._stream("mark_price", "tickers", self.focus, self._handle_ticker),
+            "mark_price": self._stream("mark_price", "tickers", self.focus, self._handle_ticker,
+                                       on_open=self._mark_reset, on_close=self._mark_reset),
+            "mark_loop": self._mark_loop(),
             "force_order": self._stream("force_order", "allLiquidation", self.focus,
                                     self._handle_liquidation),
             "open_interest": self._tickers_loop(),

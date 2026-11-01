@@ -68,31 +68,48 @@ check("row keys == market.trades columns", set(rows[0]) ^ columns("002_market.sq
 check("counted per stream and exchange",
       (c.sd.counters["rows.bybit_linear.agg_trade"], c.sd.counters["rows_total.bybit_linear"]), (2, 2))
 
-print("== tickers: deltas merged, one mark row per second")
+print("== tickers: deltas merged, a timer writes one mark row per second")
 c, sink = make()
 st = c._stat("mark_price")
-def tick(kind, ts, **fields):
-    c._handle_ticker({"topic": "tickers.BTCUSDT", "type": kind, "ts": ts,
-                      "data": {"symbol": "BTCUSDT", **fields}}, ts + 5, 100, st)
+def tick(kind, ts, sym="BTCUSDT", **fields):
+    c._handle_ticker({"topic": f"tickers.{sym}", "type": kind, "ts": ts,
+                      "data": {"symbol": sym, **fields}}, ts + 5, 100, st)
+S0 = T0 // 1000
 tick("snapshot", T0, markPrice="77771.90", indexPrice="77807.25", fundingRate="0.0000474",
      nextFundingTime="1793520000000", bid1Price="77771.9")
-tick("delta", T0 + 100, bid1Price="77772.0")                 # same second
-tick("delta", T0 + 200, markPrice="77772.10")                # same second
-tick("delta", T0 + 1100, markPrice="77772.50")               # next second
-tick("delta", T0 + 2100, bid1Price="77772.1")                # mark unchanged, still a row
+tick("delta", T0 + 100, bid1Price="77772.0")
+tick("delta", T0 + 200, markPrice="77772.10")
+check("messages alone write no row", len(sink.of("market.mark_price")), 0)
+check("mark kept for depth pricing", c._last_mark["BTCUSDT"], 77772.1)
+check("pass writes a row for the symbol", c._mark_pass(S0 + 1, T0 + 1050), 1)
+tick("delta", T0 + 1100, markPrice="77772.50")
+c._mark_pass(S0 + 2, T0 + 2050)
+tick("delta", T0 + 2100, bid1Price="77772.1")                # mark unchanged
+c._mark_pass(S0 + 3, T0 + 3050)                              # nothing since T0+2100
+c._mark_pass(S0 + 4, T0 + 4050)                              # carried forward
 rows = sink.of("market.mark_price")
+check("event_time is the second that ended", [r["event_time"] for r in rows][:2],
+      ["2026-11-01 04:35:18.000", "2026-11-01 04:35:19.000"])
 check("one row per second, from the merged state", [r["mark_price"] for r in rows],
-      [77771.9, 77772.5, 77772.5])
+      [77772.1, 77772.5, 77772.5, 77772.5])
 check("index and funding read from the merged state", (rows[1]["index_price"], rows[1]["funding_rate"]),
       (77807.25, 0.0000474))
 check("next funding time", rows[1]["next_funding_time"], "2026-11-01 08:00:00.000")
 check("focus rows are not sampled", rows[1]["sampled"], 0)
-check("mark kept for depth pricing", c._last_mark["BTCUSDT"], 77772.5)
+check("extra empty while the state is fresh", [r["extra"] for r in rows][:3], ["", "", ""])
+check("extra holds the last message time once carried", rows[3]["extra"], json.dumps({"ts": T0 + 2100}, separators=(",", ":")))
+check("stream rows counted", st.rows, 4)
+check("the timer is not a message (stall watch sees only the socket)", st.messages, 5)
 check("row keys == market.mark_price columns", set(rows[0]) ^ columns("002_market.sql", "market.mark_price"), set())
-c._handle_ticker({"topic": "tickers.BTC-27MAR26", "type": "snapshot", "ts": T0,
-                  "data": {"symbol": "BTC-27MAR26", "markPrice": "80000", "fundingRate": "",
-                           "nextFundingTime": ""}}, T0, 100, st)
+check("rows_total counted", c.sd.counters["rows.bybit_linear.mark_price"], 4)
+tick("snapshot", T0, sym="BTC-27MAR26", markPrice="80000", fundingRate="", nextFundingTime="")
+c._mark_pass(S0 + 1, T0 + 1050)
 check("a future's empty funding reads as 0", sink.of("market.mark_price")[-1]["funding_rate"], 0.0)
+check("silent past the limit: no row", c._mark_pass(S0 + 3600, T0 + 3_600_050), 0)
+c._mark_reset()
+check("a closed socket leaves no state to carry", c._mark_pass(S0 + 1, T0 + 1050), 0)
+tick("delta", T0 + 5000, markPrice="1")                      # a delta before any snapshot
+check("a delta without a snapshot still seeds the state", c._mark_pass(S0 + 6, T0 + 6050), 1)
 
 print("== liquidations: every one, side as the liquidation order's")
 c, sink = make()
