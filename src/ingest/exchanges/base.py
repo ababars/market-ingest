@@ -94,6 +94,13 @@ class Collector:
 
     # ------------------------------------------------------------------ util
 
+    def _count_rows(self, stream: str, n: int) -> None:
+        """Rows produced, per stream and for the whole exchange. The total is
+        what the stall alarm watches: per stream it would fire on every quiet
+        liquidation feed, summed over all exchanges it would miss one going down."""
+        self.sd.incr(f"rows.{self.EXCHANGE}.{stream}", n)
+        self.sd.incr(f"rows_total.{self.EXCHANGE}", n)
+
     def _stat(self, stream: str) -> StreamStats:
         st = self.stats.get(stream)
         if st is None:
@@ -272,7 +279,7 @@ class Collector:
             }
             row.update(agg or empty_aggregate(BANDS_PCT))
             self.sink.write("market.book_agg", row)
-        self.sd.incr(f"rows.{ex}.book_agg", len(self.depth))
+        self._count_rows("book_agg", len(self.depth))
         self.sd.gauge(f"book_not_ok.{ex}", not_ok)
         if self._book_quality:
             self.sd.gauge(f"book_not_ok_pct.{ex}",
@@ -317,10 +324,11 @@ class Collector:
     def _primed_counters(self) -> list[str]:
         """Counters published at zero from the start, so their charts and the
         alarms watching them exist before anything goes wrong."""
-        if not self.depth:
-            return []
         ex = self.EXCHANGE
-        return [f"rows.{ex}.book_agg", f"resyncs.{ex}.depth"]
+        names = [f"rows_total.{ex}"]
+        if self.depth:
+            names += [f"rows.{ex}.book_agg", f"resyncs.{ex}.depth"]
+        return names
 
     async def _startup(self) -> None:
         """Runs before any stream opens."""

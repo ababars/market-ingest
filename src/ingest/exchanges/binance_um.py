@@ -141,7 +141,7 @@ class BinanceUM(Collector):
 
         st.observe(nbytes=nbytes, rows=len(items), lag_ms=lag, symbol=None)
         st.symbols.update(i.get("s", "") for i in items)
-        self.sd.incr(f"rows.{EXCHANGE}.mark_price", len(items))
+        self._count_rows("mark_price", len(items))
         self.sd.incr(f"bytes.{EXCHANGE}.mark_price", nbytes)
         if lag is not None:
             self.sd.gauge(f"lag_ms.{EXCHANGE}.mark_price", max(0, lag))
@@ -182,7 +182,7 @@ class BinanceUM(Collector):
             "extra": _extra(payload, KNOWN_AGG),
         })
         st.observe(nbytes=nbytes, rows=1, lag_ms=int(recv_ms - ev), symbol=sym)
-        self.sd.incr(f"rows.{EXCHANGE}.agg_trade", 1)
+        self._count_rows("agg_trade", 1)
         self.sd.incr(f"bytes.{EXCHANGE}.agg_trade", nbytes)
         self.sd.gauge(f"lag_ms.{EXCHANGE}.agg_trade", max(0, int(recv_ms - ev)))
         if missing:
@@ -211,7 +211,7 @@ class BinanceUM(Collector):
             "extra": _extra(o, KNOWN_FORCE),
         })
         st.observe(nbytes=nbytes, rows=1, lag_ms=int(recv_ms - ev), symbol=o.get("s"))
-        self.sd.incr(f"rows.{EXCHANGE}.force_order", 1)
+        self._count_rows("force_order", 1)
         self.sd.incr(f"bytes.{EXCHANGE}.force_order", nbytes)
 
     # ----------------------------------------------------------- order book
@@ -398,7 +398,7 @@ class BinanceUM(Collector):
                     })
                     st.observe(nbytes=len(str(d)), rows=1,
                                lag_ms=int(recv_ms - ev), symbol=d["symbol"])
-                    self.sd.incr(f"rows.{EXCHANGE}.open_interest", 1)
+                    self._count_rows("open_interest", 1)
                 except Exception as exc:  # noqa: BLE001
                     self._event("open_interest", "error", f"{sym}: {exc}")
                 await asyncio.sleep(0.05)  # a poll is not a burst

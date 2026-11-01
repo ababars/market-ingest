@@ -111,12 +111,16 @@ ssh "$HOST" "sudo install -m 0644 \
     /etc/systemd/system/ && sudo systemctl daemon-reload && \
     sudo systemctl enable --now market-ingest-storage-probe.timer"
 
-if ssh "$HOST" "systemctl is-enabled --quiet market-ingest@binance_um" 2>/dev/null; then
-  say "restarting collector"
-  ssh "$HOST" "sudo systemctl restart market-ingest@binance_um"
+# One instance per exchange. Restart the enabled ones - all of them, since they
+# share this code - and leave the decision to enable a new exchange to a human.
+# An enabled instance of a template has its symlink in the wants directory.
+units="$(ssh "$HOST" "ls /etc/systemd/system/multi-user.target.wants/ 2>/dev/null | grep '^market-ingest@.*\.service$'" || true)"
+if [[ -n "$units" ]]; then
+  say "restarting collectors: $(echo $units)"
+  ssh "$HOST" "sudo systemctl restart $(echo $units)"
 else
-  say "collector not enabled yet; enable it with:"
-  echo "    ssh $HOST sudo systemctl enable --now market-ingest@binance_um"
+  say "no collector enabled yet; enable one per exchange with:"
+  echo "    ssh $HOST sudo systemctl enable --now market-ingest@<exchange>"
 fi
 
 ok "deployed"

@@ -17,6 +17,9 @@
 src/ingest/
   chsink.py              батчевая запись в ClickHouse с очередью и back-pressure
   health.py              поминутная статистика, детектор разрывов, события связи
+  rest.py                общий REST-клиент: бюджет веса, пауза после 429/418
+  book.py                локальный стакан и его посекундный агрегат
+  exchanges/base.py      общее для всех бирж: WS-цикл, здоровье, строки стакана
   exchanges/binance_um.py коннектор Binance USDⓈ-M
   __main__.py            точка входа: один процесс на биржу
 schema/                  DDL, идемпотентный
@@ -101,6 +104,24 @@ wss://fstream.binance.com/market/ws/btcusdt@aggTrade  работает
 ```bash
 ssh scali sudo systemctl enable --now market-ingest@binance_um
 ```
+
+`deploy.sh` по умолчанию деплоит на `scali` (другой хост — через `VPS_ALIAS`) и
+перезапускает все включённые экземпляры `market-ingest@*`. Новую биржу он сам
+не включает.
+
+### Новая биржа
+
+Имя биржи (например, `binance_um`) — это одновременно аргумент `--exchange`,
+секция конфига `[binance_um]`, экземпляр юнита `market-ingest@binance_um` и
+значение колонки `exchange`. Чтобы добавить биржу:
+
+1. коннектор в `src/ingest/exchanges/`, наследник `Collector` из `base.py`;
+2. строка в `EXCHANGES` в `src/ingest/__main__.py`;
+3. секция в `/etc/market-ingest/config.toml` (без неё процесс не стартует);
+4. `systemctl enable --now market-ingest@<имя>`.
+
+Графики и алармы Netdata от имени биржи не зависят: алармы заводятся на каждую
+биржу сами (`foreach`), как только приходят её метрики.
 
 Конфиг — `/etc/market-ingest/config.toml`, пароль ClickHouse — в
 `/etc/market-ingest/env` (создаётся `deploy/setup_ch_user.sh`, пользователь

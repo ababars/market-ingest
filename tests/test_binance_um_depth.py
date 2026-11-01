@@ -139,8 +139,8 @@ class FakeSink:
     def of(self, table): return [r for t, r in self.rows if t == table]
 
 class FakeStatsd:
-    def __init__(self): self.gauges = {}
-    def incr(self, *a, **k): pass
+    def __init__(self): self.gauges, self.counters = {}, {}
+    def incr(self, name, value=1): self.counters[name] = self.counters.get(name, 0) + value
     def gauge(self, name, value): self.gauges[name] = value
 
 def make(depth=None):
@@ -182,6 +182,8 @@ c._emit_book_rows(SEC + 2, time.monotonic())
 check("depth priced at mark", sink.of("market.book_agg")[-1]["depth_bid_usd_1"], 4 * 200.0)
 c._emit_book_rows(SEC + 3, time.monotonic() + 60)
 check("no delta for too long: stale", sink.of("market.book_agg")[-1]["state"], "stale")
+check("rows counted per stream and for the exchange",
+      (c.sd.counters["rows.binance_um.book_agg"], c.sd.counters["rows_total.binance_um"]), (4, 4))
 check("book age counts from going live", 59 <= sink.of("market.book_agg")[-1]["book_age_s"] <= 61, True)
 
 print("== connector: resyncs are logged and visible in the rows")

@@ -1,4 +1,7 @@
 # Copy to /etc/market-ingest/config.toml on the server.
+# One section per exchange, named as the --exchange argument and the systemd
+# instance (market-ingest@binance_um reads [binance_um]); a collector refuses to
+# start without its section.
 # Secrets do NOT live here - see /etc/market-ingest/env.
 
 [clickhouse]
