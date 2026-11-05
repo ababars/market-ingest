@@ -22,6 +22,7 @@ src/ingest/
   exchanges/base.py      общее для всех бирж: WS-цикл, здоровье, строки стакана
   exchanges/binance_um.py коннектор Binance USDⓈ-M
   exchanges/bybit_linear.py коннектор Bybit linear (USDT/USDC перпетуалы и фьючерсы)
+  exchanges/hyperliquid.py коннектор Hyperliquid (перпетуалы основного DEX и HIP-3, REST)
   __main__.py            точка входа: один процесс на биржу
 schema/                  DDL, идемпотентный
 deploy/                  systemd-юнит, деплой, создание пользователя ClickHouse
@@ -107,6 +108,26 @@ wss://fstream.binance.com/market/ws/btcusdt@aggTrade  работает
 - `openInterest` у Bybit — сумма обеих сторон, ровно вдвое больше, чем OI
   у Binance. В `open_interest` пишется односторонний `singleOpenInterest`;
   собственные цифры Bybit лежат в `extra`.
+
+## Особенности Hyperliquid
+
+- Только REST: раз в минуту `POST /info` `metaAndAssetCtxs` по основному DEX,
+  раз в 5 минут — по каждому DEX HIP-3 (акции, индексы, сырьё). Имена и
+  значения приходят в одном ответе. WS `allDexsAssetCtxs` отдаёт значения по
+  позиции, без имён, и новый листинг между чтениями сдвигает их.
+- Фандинг платится каждый час, `funding` — ставка за час (0.0000125 равен
+  0.01 % за 8 ч у Binance). В `funding_interval_h` пишется 1. Для сравнения с
+  другими биржами ставку приводят к одному периоду.
+- В ответе нет времени биржи: `event_time` — время получения ответа.
+- `markPx` → `mark_price`, `oraclePx` (оракул, медиана спотовых цен бирж) →
+  `index_price`. `premium`, `midPx`, `impactPxs`, суточные объёмы и
+  `prevDayPx` лежат в `extra`. Все строки `sampled = 1`.
+- OI односторонний, в базовой монете, как у Binance (в документации не
+  описано, так читают поставщики данных).
+- Имена родные: `BTC`, `kPEPE` (1000 PEPE), у HIP-3 с префиксом DEX
+  (`xyz:TSLA`). Отличить HIP-3: `position(symbol, ':') > 0`. Снятые с торгов
+  рынки остаются в ответе с нулевым OI и пропускаются.
+- У HIP-3 множитель фандинга задаёт создатель рынка; в `funding` он уже учтён.
 
 ## Контроль качества
 

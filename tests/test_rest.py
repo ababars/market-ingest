@@ -25,6 +25,9 @@ class Session:
     def get(self, url, params=None):
         self.calls.append((url, params))
         return self.resps.pop(0) if self.resps else Resp(200, {})
+    def post(self, url, json=None):
+        self.calls.append(("POST", url, json))
+        return self.resps.pop(0) if self.resps else Resp(200, {})
 
 
 class Clock:
@@ -67,6 +70,22 @@ try: run(clock, c.get("/a", stream="depth", what="BTCUSDT")); got = None
 except RateLimited: got = "limited"
 check("429 raises", got, "limited")
 check("and is logged with its wait", events, [("depth", "rate_limit", "BTCUSDT HTTP 429, retry after 7s")])
+
+c, clock, events = client(100, Resp(200, [{"universe": []}, []]))
+got = run(clock, c.post("/info", {"type": "metaAndAssetCtxs"}, weight=20))
+check("POST sends the body as JSON and returns the reply", (got, c._session.calls),
+      ([{"universe": []}, []], [("POST", "https://x/info", {"type": "metaAndAssetCtxs"})]))
+check("POST draws on the same budget", c.used(), 20)
+
+c, clock, events = client(100, Resp(429))
+try: run(clock, c.post("/info", {}, stream="asset_ctx", what="metaAndAssetCtxs")); got = None
+except RateLimited: got = "limited"
+check("POST: 429 raises and pauses", (got, c.pause_until > 0), ("limited", True))
+
+c, clock, events = client(100, Resp(500))
+try: run(clock, c.post("/info", {"type": "metaAndAssetCtxs", "dex": "gone"})); got = None
+except HttpError as e: got = e.status
+check("POST: non-200 raises with its status", got, 500)
 
 print("== RestClient: a 429 pauses every caller")
 c, clock, events = client()

@@ -31,6 +31,7 @@ from .metrics import Statsd
 EXCHANGES = {
     "binance_um": "ingest.exchanges.binance_um:BinanceUM",
     "bybit_linear": "ingest.exchanges.bybit_linear:BybitLinear",
+    "hyperliquid": "ingest.exchanges.hyperliquid:Hyperliquid",
 }
 
 
