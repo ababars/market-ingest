@@ -149,13 +149,15 @@ focus_symbols = [
 poll_seconds = 60
 
 # HIP-3 DEXes (stocks, indices, commodities): "all" that perpDexs lists, a list
-# of names, or [] for none. The list is refreshed every hip3_refresh_hours; a
-# DEX with every market delisted is skipped until then.
+# of names, or [] for none; anything else stops the collector at start. The
+# list is refreshed every hip3_refresh_hours; a DEX with every market delisted
+# is skipped until then.
 hip3_dexes         = "all"
 hip3_poll_seconds  = 300
 hip3_refresh_hours = 24
 
 # Hyperliquid allows 1200 per minute per IP and sends no usage header; each
 # request here weighs 20. A minute with the main DEX and ten HIP-3 DEXes due
-# spends 220.
+# spends 220 (240 with the daily perpDexs). HIP-3 leaves the last request of
+# each minute to the main DEX: more DEXes than fit wait for the next minute.
 rest_weight_per_minute = 600

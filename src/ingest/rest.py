@@ -72,6 +72,11 @@ class RestClient:
         self._roll()
         return max(self._local, self._server)
 
+    def window_left(self) -> float:
+        """Seconds until the budget window turns over."""
+        self._roll()
+        return max(0.0, (self._window + 1) * self.window_s - self.wall())
+
     async def _wait_pause(self) -> None:
         while (left := self.pause_until - time.monotonic()) > 0:
             await asyncio.sleep(left)

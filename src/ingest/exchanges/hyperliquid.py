@@ -56,9 +56,13 @@ HOUR_MS = 3_600_000
 KNOWN_MARK = {"markPx", "oraclePx", "funding", "openInterest"}
 
 
-def _f(x) -> float:
-    """Numbers come as strings; null where a field does not apply."""
-    return float(x) if x not in (None, "") else 0.0
+def _need(c: dict, key: str) -> float:
+    """A number every listed market has (they come as strings). Without it the
+    row would carry a made-up 0, so the coin is skipped instead."""
+    x = c.get(key)
+    if x in (None, ""):
+        raise ValueError(f"no {key}")
+    return float(x)
 
 
 def next_hour_ms(ms: float) -> float:
@@ -82,6 +86,10 @@ class Hyperliquid(Collector):
         self.hip3_refresh_s = float(cfg.get("hip3_refresh_hours", 24)) * 3600
         # "all": every DEX perpDexs lists; a list: only those; []: none
         self.hip3_dexes = cfg.get("hip3_dexes", "all")
+        if not (self.hip3_dexes == "all" or (isinstance(self.hip3_dexes, list)
+                                             and all(isinstance(x, str) and x for x in self.hip3_dexes))):
+            raise ValueError(f'hyperliquid.hip3_dexes: "all" or a list of DEX names, '
+                             f'not {self.hip3_dexes!r}')
         self._dexes: list[str] = []
         # DEXes whose every market is delisted: not asked again until the
         # next refresh of the list.
@@ -92,7 +100,17 @@ class Hyperliquid(Collector):
 
     async def _info(self, body: dict, *, stream: str, what: str):
         assert self.rest is not None
+        if stream == "hip3":
+            await self._hip3_room()
         return await self.rest.post("/info", body, weight=INFO_WEIGHT, stream=stream, what=what)
+
+    async def _hip3_room(self) -> None:
+        """HIP-3 never takes the last request of a window: that one is the
+        main DEX's. The budget is served first come, first served, so with
+        enough HIP-3 DEXes ("all" picks up new ones) the main poll would
+        otherwise wait for the next window and its minute would be lost."""
+        while 0 < self.rest.used() and self.rest.used() + 2 * INFO_WEIGHT > self.rest.budget:
+            await asyncio.sleep(self.rest.window_left() + 0.1)
 
     async def _poll(self, dex: str, stream: str) -> int | None:
         """One DEX: rows written, or None when the request failed."""
@@ -170,12 +188,12 @@ class Hyperliquid(Collector):
             "symbol": sym,
             "event_time": ts,
             "ingest_time": ts,
-            "mark_price": _f(c.get("markPx")),
+            "mark_price": _need(c, "markPx"),
             # the oracle: a weighted median of spot prices on other venues,
             # what Binance calls the index
-            "index_price": _f(c.get("oraclePx")),
+            "index_price": _need(c, "oraclePx"),
             "settle_price": 0.0,
-            "funding_rate": _f(c.get("funding")),
+            "funding_rate": _need(c, "funding"),
             "next_funding_time": ch_ts(next_hour_ms(recv_ms)),
             "funding_interval_h": FUNDING_INTERVAL_H,
             "sampled": 1,
@@ -190,7 +208,7 @@ class Hyperliquid(Collector):
             "symbol": sym,
             "event_time": ts,
             "ingest_time": ts,
-            "open_interest": _f(c.get("openInterest")),
+            "open_interest": _need(c, "openInterest"),
             "extra": "",
         }
 
@@ -229,7 +247,14 @@ class Hyperliquid(Collector):
                 self._event("hip3", "error", f"perpDexs: {type(exc).__name__}: {exc}")
                 return False
             # the first entry is null: the main DEX
-            self._dexes = [x["name"] for x in d if isinstance(x, dict) and x.get("name")]
+            names = ([x["name"] for x in d if isinstance(x, dict) and x.get("name")]
+                     if isinstance(d, list) else [])
+            if not names:
+                # Ten DEXes exist; an answer without any is broken. Kept as a
+                # failure, it is asked again next round, not a day later.
+                self._event("hip3", "error", f"perpDexs: no DEXes in {str(d)[:200]}")
+                return False
+            self._dexes = names
         self._dead.clear()
         self._event("hip3", "subscribed", f"{len(self._dexes)} DEXes: {','.join(self._dexes)}")
         return True
