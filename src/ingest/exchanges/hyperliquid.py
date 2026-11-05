@@ -108,12 +108,21 @@ class Hyperliquid(Collector):
             self._event(stream, "error", f"{what}: {type(exc).__name__}: {exc}")
             log.warning("%s failed: %s", what, exc)
             return None
-        return self._write_ctxs(dex, d, now_ms(), self._stat(stream))
+        try:
+            return self._write_ctxs(dex, d, now_ms(), self._stat(stream))
+        except Exception as exc:  # noqa: BLE001 - a crash restarts the process,
+            # and every restart asks every DEX again: a DEX that keeps answering
+            # garbage would spend the IP's limit that the main DEX needs
+            self._event(stream, "error", f"{what}: {type(exc).__name__}: {exc}")
+            log.exception("%s: unreadable answer", what)
+            return None
 
     def _write_ctxs(self, dex: str, d, recv_ms: float, st: StreamStats) -> int:
         """Rows for every listed market of one DEX's answer."""
         try:
             universe, ctxs = d[0]["universe"], d[1]
+            if not isinstance(universe, list) or not isinstance(ctxs, list):
+                raise TypeError
         except (TypeError, KeyError, IndexError):
             self._event(st.stream, "error", f"{dex or 'main'}: unexpected answer {str(d)[:200]}")
             return 0
@@ -125,16 +134,28 @@ class Hyperliquid(Collector):
             return 0
         if not dex and not self._focus_reported:
             self._report_focus({u["name"]: "delisted" if u.get("isDelisted") else "trading"
-                                for u in universe}, "trading")
+                                for u in universe if isinstance(u, dict) and u.get("name")},
+                               "trading")
             self._focus_reported = True
-        n = 0
-        for u, c in zip(universe, ctxs):
-            if u.get("isDelisted"):
+        n, bad = 0, []
+        for i, (u, c) in enumerate(zip(universe, ctxs)):
+            try:
+                if u.get("isDelisted"):
+                    continue
+                # both rows built before either is written: never a mark
+                # without its open interest
+                mark, oi = self._mark_row(u["name"], c, recv_ms), self._oi_row(u["name"], c, recv_ms)
+            except Exception as exc:  # noqa: BLE001 - one bad coin, not the whole DEX
+                name = u.get("name") if isinstance(u, dict) else None
+                bad.append(f"{name or '#' + str(i)} ({type(exc).__name__}: {exc})")
                 continue
-            self.sink.write("market.mark_price", self._mark_row(u["name"], c, recv_ms))
-            self.sink.write("market.open_interest", self._oi_row(u["name"], c, recv_ms))
+            self.sink.write("market.mark_price", mark)
+            self.sink.write("market.open_interest", oi)
             n += 1
-        if dex and n == 0:
+        if bad:
+            self._event(st.stream, "error",
+                        f"{dex or 'main'}: {len(bad)} unreadable, skipped: {'; '.join(bad)}"[:400])
+        if dex and n == 0 and not bad:
             self._dead.add(dex)
         st.observe(nbytes=0, rows=2 * n, lag_ms=None, symbol=None)
         self._count_rows("mark_price", n)
@@ -175,17 +196,30 @@ class Hyperliquid(Collector):
 
     # ----------------------------------------------------------------- loops
 
-    async def _every(self, period: float, step) -> None:
+    def _roll(self, stream: str) -> None:
+        """Close the stream's minute right BEFORE a poll, so the closed row
+        holds the previous poll under the minute it was made in. Each loop
+        closes only its own stream: rolled every minute, the HIP-3 stream
+        (polled every few minutes) would log empty minutes in between, and
+        those read as blind spots in ops.v_silent_minutes."""
+        self._stat(stream)
+        self._roll_health({stream})
+
+    async def _main_loop(self) -> None:
+        # A fixed schedule rather than "a period after the last poll ended":
+        # the polls keep their second of the minute, one poll per minute.
+        due = time.monotonic()
         while True:
-            t0 = time.monotonic()
-            await step()
-            self._roll_health()
-            await asyncio.sleep(max(1.0, period - (time.monotonic() - t0)))
+            self._roll("asset_ctx")
+            await self._poll("", "asset_ctx")
+            due += self.poll_s
+            now = time.monotonic()
+            if due < now:       # fell behind (a long rate-limit pause): new grid
+                due = now + self.poll_s
+            await asyncio.sleep(due - now)
 
-    async def _main_step(self) -> None:
-        await self._poll("", "asset_ctx")
-
-    async def _refresh_dexes(self) -> None:
+    async def _refresh_dexes(self) -> bool:
+        """Fetch the DEX list; False when that failed."""
         if isinstance(self.hip3_dexes, list):
             self._dexes = list(self.hip3_dexes)
         else:
@@ -193,23 +227,25 @@ class Hyperliquid(Collector):
                 d = await self._info({"type": "perpDexs"}, stream="hip3", what="perpDexs")
             except Exception as exc:  # noqa: BLE001 - keep the list we have
                 self._event("hip3", "error", f"perpDexs: {type(exc).__name__}: {exc}")
-                return
+                return False
             # the first entry is null: the main DEX
             self._dexes = [x["name"] for x in d if isinstance(x, dict) and x.get("name")]
         self._dead.clear()
         self._event("hip3", "subscribed", f"{len(self._dexes)} DEXes: {','.join(self._dexes)}")
+        return True
 
     async def _hip3_loop(self) -> None:
         refreshed = float("-inf")
         while True:
             t0 = time.monotonic()
-            if t0 - refreshed >= self.hip3_refresh_s:
-                await self._refresh_dexes()
+            self._roll("hip3")
+            # A failed fetch is retried on the next round, not a day later;
+            # until then the list we have (empty at start) is polled.
+            if t0 - refreshed >= self.hip3_refresh_s and await self._refresh_dexes():
                 refreshed = t0
             for dex in self._dexes:
                 if dex not in self._dead:
                     await self._poll(dex, "hip3")
-            self._roll_health()
             await asyncio.sleep(max(1.0, self.hip3_poll_s - (time.monotonic() - t0)))
 
     # -------------------------------------------------------------------- run
@@ -219,7 +255,7 @@ class Hyperliquid(Collector):
         return names + super()._primed_counters()
 
     def _coroutines(self) -> dict:
-        work = {"asset_ctx": self._every(self.poll_s, self._main_step)}
+        work = {"asset_ctx": self._main_loop()}
         if self.hip3_dexes:
             work["hip3"] = self._hip3_loop()
         return work

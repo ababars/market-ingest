@@ -123,9 +123,13 @@ class Collector:
             ),
         )
 
-    def _roll_health(self) -> None:
+    def _roll_health(self, streams: set[str] | None = None) -> None:
+        """Close the minute of every stream, or only of `streams`: a REST
+        collector closes each poll loop's stream on that loop's own clock."""
         minute = int(time.time() // 60)
         for st in self.stats.values():
+            if streams is not None and st.stream not in streams:
+                continue
             row = st.roll(minute)
             if row:
                 row["insert_errors"] = self.sink.insert_errors

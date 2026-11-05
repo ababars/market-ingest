@@ -1,4 +1,4 @@
-import asyncio, json, logging, re, sys
+import asyncio, json, logging, re, sys, time
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -183,6 +183,70 @@ check("no second event (the pause logs it)", len(events(sink)), 1)
 c.rest = FakeRest(MAIN)
 check("main poll asks without dex", (asyncio.run(c._poll("", "asset_ctx")), c.rest.bodies),
       (2, [{"type": "metaAndAssetCtxs"}]))
+
+print("== a failed perpDexs is retried on the next round, not a day later")
+async def hip3_rounds(c, n):
+    """n passes of _hip3_loop; its sleep ends the last one."""
+    real, left = asyncio.sleep, [n]
+    async def fake(*a):
+        left[0] -= 1
+        if left[0] == 0: raise asyncio.CancelledError
+    asyncio.sleep = fake
+    try: await c._hip3_loop()
+    except asyncio.CancelledError: pass
+    finally: asyncio.sleep = real
+
+c, sink = make()
+c.rest = FakeRest(TimeoutError("read"), PERP_DEXS, XYZ, DEAD, XYZ)
+asyncio.run(hip3_rounds(c, 3))
+check("asked again on the second round; after a success kept until the refresh", c.rest.bodies,
+      [{"type": "perpDexs"},
+       {"type": "perpDexs"}, {"type": "metaAndAssetCtxs", "dex": "xyz"},
+       {"type": "metaAndAssetCtxs", "dex": "flx"},
+       {"type": "metaAndAssetCtxs", "dex": "xyz"}])
+check("the failure logged", events(sink)[0], ("hip3", "error", "perpDexs: TimeoutError: read"))
+
+print("== stream_health: a poll is filed under its own minute; HIP-3 has no empty minutes")
+def at(t): time.time = lambda: t
+real_time = time.time
+M = 29_896_922 * 60                      # a whole minute, 2026-11-04 18:02 UTC
+try:
+    c, sink = make()
+    c.rest = FakeRest(MAIN, MAIN, XYZ)
+    health = lambda: [(r["stream"], r["minute"], r["messages"]) for r in sink.of("ops.stream_health")]
+    at(M + 30); c._roll("asset_ctx"); asyncio.run(c._poll("", "asset_ctx"))
+    c._roll("hip3"); asyncio.run(c._poll("xyz", "hip3"))
+    at(M + 90); c._roll("asset_ctx"); asyncio.run(c._poll("", "asset_ctx"))
+    check("first poll: minute M, one message", health(), [("asset_ctx", "2026-11-04 18:02:00", 1)])
+    at(M + 150); c._roll("asset_ctx")
+    check("HIP-3 not closed by the main loop", [h[0] for h in health()], ["asset_ctx", "asset_ctx"])
+    at(M + 330); c._roll("hip3")
+    check("HIP-3 closed on its own round, under the minute of its poll", health()[-1],
+          ("hip3", "2026-11-04 18:02:00", 1))
+finally:
+    time.time = real_time
+
+print("== an unreadable coin is skipped, not the DEX, and nothing raises")
+c, sink = make()
+st = c._stat("asset_ctx")
+broken = [{"universe": [{"name": "BTC"}, {"name": "ETH"}, {"szDecimals": 1}, None, {"name": "SOL"}]},
+          [BTC_CTX, None, ETH_CTX, ETH_CTX, dict(ETH_CTX, markPx="n/a")]]
+check("only the good coin written", c._write_ctxs("", broken, RECV, st), 1)
+check("as a pair", ([r["symbol"] for r in sink.of("market.mark_price")],
+                    [r["symbol"] for r in sink.of("market.open_interest")]), (["BTC"], ["BTC"]))
+err = events(sink)[-1]
+check("one error naming the skipped ones", (err[:2], err[2].startswith("main: 4 unreadable, skipped: ETH (")),
+      (("asset_ctx", "error"), True))
+check("a nameless coin by position", "#2 (" in err[2] and "#3 (" in err[2] and "SOL (ValueError" in err[2], True)
+check("a universe that is not a list", c._write_ctxs("", [{"universe": None}, []], RECV, st), 0)
+check("a DEX whose coins are all unreadable is not dead",
+      (c._write_ctxs("xyz", [XYZ[0], [None]], RECV, st), c._dead), (0, set()))
+c, sink = make()
+c.rest = FakeRest(MAIN)
+def boom(*a): raise RuntimeError("bug")
+c._write_ctxs = boom
+check("anything else from an answer: logged, poll returns None", asyncio.run(c._poll("", "asset_ctx")), None)
+check("logged", events(sink), [("asset_ctx", "error", "metaAndAssetCtxs main: RuntimeError: bug")])
 
 print("== next full hour")
 check("inside an hour", next_hour_ms(3_600_000 * 5 + 1), 3_600_000 * 6)
