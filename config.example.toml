@@ -154,10 +154,10 @@ poll_seconds = 60
 # is skipped until then.
 hip3_dexes         = "all"
 hip3_poll_seconds  = 300
-hip3_refresh_hours = 24
+hip3_refresh_hours = 1
 
 # Hyperliquid allows 1200 per minute per IP and sends no usage header; each
 # request here weighs 20. A minute with the main DEX and ten HIP-3 DEXes due
-# spends 220 (240 with the daily perpDexs). HIP-3 leaves the last request of
+# spends 220 (240 with the hourly perpDexs). HIP-3 leaves the last request of
 # each minute to the main DEX: more DEXes than fit wait for the next minute.
 rest_weight_per_minute = 600

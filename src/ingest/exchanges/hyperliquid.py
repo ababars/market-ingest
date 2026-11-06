@@ -14,8 +14,10 @@ What is easy to get wrong:
   the 0.01 % per 8 h of Binance's default. funding_interval_h says 1, and the
   next payment is the next full hour;
 - the answer carries no time of its own: event_time is when it arrived;
-- open interest is one side, in the base coin, as on Binance (not documented
-  by Hyperliquid; this is how data vendors read it, and it matches the size);
+- openInterest is BOTH sides (longs + shorts), in the base coin. Not
+  documented; checked on 2026-11-06: BTC 42 604 against HyperTracker's
+  42 308 total / 21 154 long, and on xyz:CAMBRICON against clearinghouseState.
+  Stored halved, one side as on Binance; the raw figure stays in extra;
 - coins are named without a quote currency (BTC, kPEPE = 1000 PEPE) and HIP-3
   coins with their DEX (xyz:TSLA). Delisted coins stay in the answer with zero
   open interest and are skipped;
@@ -28,12 +30,13 @@ Rows go to the same tables as every venue:
     mark_price     markPx, oraclePx as index_price, funding; the other fields
                    (premium, midPx, impactPxs, 24 h volumes, prevDayPx) in extra.
                    sampled = 1: one row a minute (HIP-3: per poll)
-    open_interest  openInterest
+    open_interest  openInterest / 2 (one side); openInterest in extra
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -83,7 +86,7 @@ class Hyperliquid(Collector):
                                default_pause_s=60.0, on_event=self._event)
         self.poll_s = float(cfg.get("poll_seconds", 60))
         self.hip3_poll_s = float(cfg.get("hip3_poll_seconds", 300))
-        self.hip3_refresh_s = float(cfg.get("hip3_refresh_hours", 24)) * 3600
+        self.hip3_refresh_s = float(cfg.get("hip3_refresh_hours", 1)) * 3600
         # "all": every DEX perpDexs lists; a list: only those; []: none
         self.hip3_dexes = cfg.get("hip3_dexes", "all")
         if not (self.hip3_dexes == "all" or (isinstance(self.hip3_dexes, list)
@@ -208,8 +211,9 @@ class Hyperliquid(Collector):
             "symbol": sym,
             "event_time": ts,
             "ingest_time": ts,
-            "open_interest": _need(c, "openInterest"),
-            "extra": "",
+            "open_interest": _need(c, "openInterest") / 2,
+            "extra": json.dumps({"openInterest": c["openInterest"], "derived": "openInterest/2"},
+                                separators=(",", ":")),
         }
 
     # ----------------------------------------------------------------- loops
@@ -251,7 +255,7 @@ class Hyperliquid(Collector):
                      if isinstance(d, list) else [])
             if not names:
                 # Ten DEXes exist; an answer without any is broken. Kept as a
-                # failure, it is asked again next round, not a day later.
+                # failure, it is asked again next round, not at the next refresh.
                 self._event("hip3", "error", f"perpDexs: no DEXes in {str(d)[:200]}")
                 return False
             self._dexes = names
@@ -264,7 +268,7 @@ class Hyperliquid(Collector):
         while True:
             t0 = time.monotonic()
             self._roll("hip3")
-            # A failed fetch is retried on the next round, not a day later;
+            # A failed fetch is retried on the next round, not at the next refresh;
             # until then the list we have (empty at start) is polled.
             if t0 - refreshed >= self.hip3_refresh_s and await self._refresh_dexes():
                 refreshed = t0

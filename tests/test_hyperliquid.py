@@ -104,8 +104,10 @@ check("one row a minute: sampled", btc["sampled"], 1)
 check("no settle price", btc["settle_price"], 0.0)
 check("the other fields kept in extra", json.loads(btc["extra"]),
       {k: BTC_CTX[k] for k in ("prevDayPx", "dayNtlVlm", "premium", "midPx", "impactPxs", "dayBaseVlm")})
-check("OI as sent, one side in coins", [(r["symbol"], r["open_interest"]) for r in ois],
-      [("BTC", 40113.83472), ("ETH", 1038139.6994000002)])
+check("OI halved to one side, in coins", [(r["symbol"], r["open_interest"]) for r in ois],
+      [("BTC", 40113.83472 / 2), ("ETH", 1038139.6994000002 / 2)])
+check("raw two-sided OI kept in extra", json.loads(ois[0]["extra"]),
+      {"openInterest": "40113.83472", "derived": "openInterest/2"})
 check("row keys == market.mark_price columns", set(btc) ^ columns("002_market.sql", "market.mark_price"), set())
 check("row keys == market.open_interest columns", set(ois[0]) ^ columns("002_market.sql", "market.open_interest"), set())
 check("rows counted per table", (c.sd.counters["rows.hyperliquid.mark_price"],
@@ -184,7 +186,7 @@ c.rest = FakeRest(MAIN)
 check("main poll asks without dex", (asyncio.run(c._poll("", "asset_ctx")), c.rest.bodies),
       (2, [{"type": "metaAndAssetCtxs"}]))
 
-print("== a failed perpDexs is retried on the next round, not a day later")
+print("== a failed perpDexs is retried on the next round, not at the next refresh")
 async def hip3_rounds(c, n):
     """n passes of _hip3_loop; its sleep ends the last one."""
     real, left = asyncio.sleep, [n]
