@@ -59,6 +59,13 @@ HOUR_MS = 3_600_000
 KNOWN_MARK = {"markPx", "oraclePx", "funding", "openInterest"}
 
 
+def _why(exc: Exception) -> str:
+    """Type and first line: a timeout has no text at all, and a 502 brings
+    nginx's whole HTML page."""
+    text = str(exc).strip().splitlines()
+    return f"{type(exc).__name__}: {text[0]}" if text else type(exc).__name__
+
+
 def _need(c: dict, key: str) -> float:
     """A number every listed market has (they come as strings). Without it the
     row would carry a made-up 0, so the coin is skipped instead."""
@@ -126,15 +133,15 @@ class Hyperliquid(Collector):
         except RateLimited:
             return None
         except Exception as exc:  # noqa: BLE001 - the next poll tries again
-            self._event(stream, "error", f"{what}: {type(exc).__name__}: {exc}")
-            log.warning("%s failed: %s", what, exc)
+            self._event(stream, "error", f"{what}: {_why(exc)}")
+            log.warning("%s failed: %s", what, _why(exc))
             return None
         try:
             return self._write_ctxs(dex, d, now_ms(), self._stat(stream))
         except Exception as exc:  # noqa: BLE001 - a crash restarts the process,
             # and every restart asks every DEX again: a DEX that keeps answering
             # garbage would spend the IP's limit that the main DEX needs
-            self._event(stream, "error", f"{what}: {type(exc).__name__}: {exc}")
+            self._event(stream, "error", f"{what}: {_why(exc)}")
             log.exception("%s: unreadable answer", what)
             return None
 
@@ -248,7 +255,7 @@ class Hyperliquid(Collector):
             try:
                 d = await self._info({"type": "perpDexs"}, stream="hip3", what="perpDexs")
             except Exception as exc:  # noqa: BLE001 - keep the list we have
-                self._event("hip3", "error", f"perpDexs: {type(exc).__name__}: {exc}")
+                self._event("hip3", "error", f"perpDexs: {_why(exc)}")
                 return False
             # the first entry is null: the main DEX
             names = ([x["name"] for x in d if isinstance(x, dict) and x.get("name")]

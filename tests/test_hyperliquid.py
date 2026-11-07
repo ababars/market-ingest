@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from ingest.exchanges.hyperliquid import Hyperliquid, next_hour_ms
+from ingest.exchanges.hyperliquid import Hyperliquid, _why, next_hour_ms
 from ingest.rest import HttpError, RateLimited
 
 logging.disable(logging.CRITICAL)
@@ -179,6 +179,10 @@ c, sink = make()
 c.rest = FakeRest(HttpError(500, "null"))
 check("a DEX that is gone: HTTP 500", asyncio.run(c._poll("gone", "hip3")), None)
 check("logged", events(sink), [("hip3", "error", "metaAndAssetCtxs gone: HttpError: HTTP 500: null")])
+check("a timeout has no text: the type alone", _why(TimeoutError()), "TimeoutError")
+check("a 502 page: its first line only",
+      _why(HttpError(502, "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n</html>")),
+      "HttpError: HTTP 502: <html>")
 c.rest = FakeRest(RateLimited("HTTP 429"))
 check("rate limited: None", asyncio.run(c._poll("", "asset_ctx")), None)
 check("no second event (the pause logs it)", len(events(sink)), 1)
