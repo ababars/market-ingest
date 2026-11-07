@@ -137,3 +137,33 @@ levels                    = 1000      # 1, 50, 200 or 1000
 stale_seconds             = 5
 # A book left without a snapshot this long is subscribed again.
 resubscribe_after_seconds = 10
+
+[hyperliquid]
+enabled = true
+
+# Native names: no quote currency, k = 1000 (kPEPE), case matters. Only
+# checked at start - every listed perpetual is collected once a minute anyway.
+focus_symbols = [
+    "BTC", "ETH", "SOL", "XRP", "BNB",
+    "DOGE", "ADA", "LINK", "AVAX", "SUI",
+    "LTC", "TRX", "DOT", "NEAR", "APT",
+    "ARB", "OP", "HYPE", "FIL", "INJ",
+]
+
+# One metaAndAssetCtxs of the main DEX per period: mark, oracle, funding and
+# open interest of every perpetual.
+poll_seconds = 60
+
+# HIP-3 DEXes (stocks, indices, commodities): "all" that perpDexs lists, a list
+# of names, or [] for none; anything else stops the collector at start. The
+# list is refreshed every hip3_refresh_hours; a DEX with every market delisted
+# is skipped until then.
+hip3_dexes         = "all"
+hip3_poll_seconds  = 300
+hip3_refresh_hours = 1
+
+# Hyperliquid allows 1200 per minute per IP and sends no usage header; each
+# request here weighs 20. A minute with the main DEX and ten HIP-3 DEXes due
+# spends 220 (240 with the hourly perpDexs). HIP-3 leaves the last request of
+# each minute to the main DEX: more DEXes than fit wait for the next minute.
+rest_weight_per_minute = 600

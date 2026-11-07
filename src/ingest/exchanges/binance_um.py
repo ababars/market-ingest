@@ -120,6 +120,9 @@ class BinanceUM(Collector):
                 "settle_price": float(it.get("P", 0) or 0),
                 "funding_rate": float(it.get("r", 0) or 0),
                 "next_funding_time": ch_ts(float(it.get("T", 0) or 0)),
+                # markPrice does not carry it; GET /fapi/v1/fundingInfo lists the
+                # symbols that are not on 8 h. Unknown until that is polled.
+                "funding_interval_h": 0,
                 "sampled": 0,
                 "extra": _extra(it, KNOWN_MARK),
             }
