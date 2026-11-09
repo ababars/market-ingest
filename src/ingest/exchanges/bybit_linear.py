@@ -74,6 +74,7 @@ def subscribe_messages(stream: str, topics: list[str], op: str = "subscribe") ->
 
 class BybitLinear(Collector):
     EXCHANGE = EXCHANGE
+    WS_STREAMS = ("mark_price", "agg_trade", "force_order")
 
     def __init__(self, cfg: dict, sink, *, focus: list[str], sd: Statsd) -> None:
         super().__init__(cfg, sink, focus=focus, sd=sd)
@@ -276,6 +277,24 @@ class BybitLinear(Collector):
 
     def _depth_on_close(self) -> None:
         self._depth_open = False
+
+    def _on_bad_message(self, stream: str, payload) -> None:
+        """A depth message that broke halfway may have changed part of a live
+        book: drop it and ask for a fresh snapshot. A book still waiting for
+        one is left to the depth watchdog, which resubscribes it."""
+        if stream != "depth" or not isinstance(payload, dict):
+            return
+        d = payload.get("data")
+        sync = self.depth.get(d.get("s")) if isinstance(d, dict) else None
+        if sync is not None and sync.live:
+            mono = time.monotonic()
+            self._depth_resync(sync, sync.reset("bad message", mono))
+            hold = self._repair_hold(sync.symbol, mono)
+            if hold == 0:
+                self._resubscribe(sync, mono)
+            else:
+                # The watchdog resubscribes once the hold is over.
+                sync.syncing_since_mono = mono + hold - self.depth_resubscribe_s
 
     def _handle_depth(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
         d = payload.get("data") or {}
