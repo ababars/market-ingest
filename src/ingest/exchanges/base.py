@@ -58,6 +58,8 @@ BAD_MESSAGE_REPORT_S = 60.0
 # that broke its format would otherwise get a snapshot request or a
 # resubscribe for every message it sends.
 REPAIR_CALM_S = 300.0
+# The stream whose ids self.seq follows.
+SEQ_STREAM = "agg_trade"
 
 
 def backoff_delay(attempt: int, rnd: float) -> float:
@@ -253,8 +255,11 @@ class Collector:
                 if on_close:
                     on_close()
             # Keep the sequence state: the jump across this reconnect is the
-            # measurement of what the outage cost us.
-            self.seq.mark_reconnect()
+            # measurement of what the outage cost us. Only the trade stream
+            # feeds the tracker; another stream's reconnect would tag a gap
+            # on a trade connection that never dropped.
+            if stream == SEQ_STREAM:
+                self.seq.mark_reconnect()
             # Only a connection that lasted starts the backoff over. A venue
             # that accepts and at once drops every connection (or a message
             # that breaks the stream each time) would otherwise be reconnected

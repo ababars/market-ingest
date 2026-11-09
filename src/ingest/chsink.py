@@ -224,17 +224,22 @@ class ClickHouseSink:
                 self._columns[table] = cols = fresh
         if cols is None:
             return rows
-        unknown = keys - cols
         before = self.unknown.get(table, set())
-        if unknown and unknown != before:
+        new = keys - cols - before
+        # A key stays reported until the table's columns show it: a batch
+        # that happens not to carry it proves nothing.
+        unknown = (before - cols) | new
+        if new:
             log.error("%s has no column for %s: these values are NOT stored until the "
-                      "schema is migrated (the rows themselves are)", table, sorted(unknown))
-        elif before and not unknown:
-            log.warning("%s: rows fit its columns again", table)
+                      "schema is migrated (the rows themselves are)", table, sorted(new))
+        if before - unknown:
+            log.warning("%s now has a column for %s", table, sorted(before - unknown))
         if not unknown:
             self.unknown.pop(table, None)
             return rows
         self.unknown[table] = unknown
+        if keys.isdisjoint(unknown):
+            return rows
         return [{k: v for k, v in r.items() if k not in unknown} for r in rows]
 
     async def _read_columns(self, table: str) -> set[str] | None:

@@ -273,7 +273,7 @@ check("nothing dropped", (s.dropped_rows, s.inserted_rows), (0, 2))
 s.write("t", {"i": 2, "new": 4})
 run(s._flush("t", s._queues["t"]))
 check("not read again within a minute", len(s._session.queries), 1)
-check("still reported", s.unknown_columns(), 1)
+check("both still reported, though this batch had one", s.unknown_columns(), 2)
 
 # the migration lands while the collector runs
 s._session.columns.append("new")
@@ -282,7 +282,7 @@ s.write("t", {"i": 3, "new": 5})
 run(s._flush("t", s._queues["t"]))
 check("read again after a minute", len(s._session.queries), 2)
 check("migrated column now stored", s._session.bodies[-1], '{"i":3,"new":5}')
-check("report cleared", (s.unknown, s.unknown_columns()), ({}, 0))
+check("only the migrated key cleared", (s.unknown, s.unknown_columns()), ({"t": {"newer"}}, 1))
 
 for name, describe in (("table missing (404)", 404), ("network down", ConnectionResetError("reset"))):
     s = checked([], [{"i": 0, "x": 1}], describe=describe)
@@ -292,6 +292,22 @@ for name, describe in (("table missing (404)", 404), ("network down", Connection
     s.write("t", {"i": 1})
     run(s._flush("t", s._queues["t"]))
     check(f"{name}: a failed read is not retried within a minute", len(s._session.queries), 1)
+
+print("== a key missing from some batches stays reported until the table has it")
+s = checked(["i"], [{"i": 0, "opt": 1}])
+run(s._flush("t", s._queues["t"]))
+s.write("t", {"i": 1})
+run(s._flush("t", s._queues["t"]))
+check("a batch without it does not clear it", s.unknown_columns(), 1)
+check("and is sent as it is", s._session.bodies[-1], '{"i":1}')
+s.write("t", {"i": 2, "other": 1})
+run(s._flush("t", s._queues["t"]))
+check("a second unknown key adds to the first", s.unknown, {"t": {"opt", "other"}})
+s._session.columns += ["opt", "other"]
+s._columns_read["t"] -= 601
+s.write("t", {"i": 3})
+run(s._flush("t", s._queues["t"]))
+check("cleared once the columns show them", (s.unknown, s.unknown_columns()), ({}, 0))
 
 print("== a column dropped under a running collector is noticed")
 s = checked(["i", "gone"], [{"i": 0, "gone": 1}])

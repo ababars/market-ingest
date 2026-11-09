@@ -88,10 +88,10 @@ class C(Collector):
         self.repairs.append(payload)
 
 
-def run_loop(plan, handle=lambda *a: None, reconnects=None, cfg=None):
+def run_loop(plan, handle=lambda *a: None, reconnects=None, cfg=None, stream="s", c=None):
     """Run _ws_loop over `plan` (one FakeWS or exception per connect).
     Returns (collector, pauses asked for, connect kwargs)."""
-    c = C(cfg)
+    c = c or C(cfg)
     plan = list(plan)
     pauses, kwargs = [], []
     stop_after = len(plan) if reconnects is None else reconnects
@@ -112,7 +112,7 @@ def run_loop(plan, handle=lambda *a: None, reconnects=None, cfg=None):
         base.websockets.connect, real_connect = connect, base.websockets.connect
         asyncio.sleep = sleep
         try:
-            await c._ws_loop("s", "wss://x", handle)
+            await c._ws_loop(stream, "wss://x", handle)
         except asyncio.CancelledError:
             pass
         finally:
@@ -194,6 +194,14 @@ class Broken(C):
 c = Broken()
 c._bad_message("s", "x", None, ValueError("v"))
 check("still counted", c.sd.counts.get("bad_messages.test.s"), 1)
+
+print("== only the trade stream's reconnect tags the next trade gap")
+c = C()
+c.seq.check("BTC", 100)
+run_loop([FakeWS(life=0)], stream="mark_price", c=c)
+check("another stream's reconnect: an ordinary gap", c.seq.check("BTC", 105), (4, False))
+run_loop([FakeWS(life=0)], stream="agg_trade", c=c)
+check("the trade stream's own: across a reconnect", c.seq.check("BTC", 110), (4, True))
 
 print("== repairs of one book after bad messages: 1, 2, 4 ... 60 s apart")
 c = C()
