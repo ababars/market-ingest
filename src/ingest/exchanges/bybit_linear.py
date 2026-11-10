@@ -221,6 +221,8 @@ class BybitLinear(Collector):
             "settle_price": 0.0,            # Bybit publishes no estimated settle price
             "funding_rate": _f(t.get("fundingRate")),
             "next_funding_time": ch_ts(_f(t.get("nextFundingTime"))),
+            # 8, 4 or 1 by symbol; "" on a dated future, which pays none
+            "funding_interval_h": int(_f(t.get("fundingIntervalHour"))),
             "sampled": sampled,
             # A ticker carries some thirty fields, mostly 24 h statistics that
             # are derivable from trades; none is kept.

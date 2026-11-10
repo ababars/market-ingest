@@ -76,7 +76,7 @@ def tick(kind, ts, sym="BTCUSDT", **fields):
                       "data": {"symbol": sym, **fields}}, ts + 5, 100, st)
 S0 = T0 // 1000
 tick("snapshot", T0, markPrice="77771.90", indexPrice="77807.25", fundingRate="0.0000474",
-     nextFundingTime="1793520000000", bid1Price="77771.9")
+     nextFundingTime="1793520000000", fundingIntervalHour="4", bid1Price="77771.9")
 tick("delta", T0 + 100, bid1Price="77772.0")
 tick("delta", T0 + 200, markPrice="77772.10")
 check("messages alone write no row", len(sink.of("market.mark_price")), 0)
@@ -95,6 +95,7 @@ check("one row per second, from the merged state", [r["mark_price"] for r in row
 check("index and funding read from the merged state", (rows[1]["index_price"], rows[1]["funding_rate"]),
       (77807.25, 0.0000474))
 check("next funding time", rows[1]["next_funding_time"], "2026-11-01 08:00:00.000")
+check("funding interval from the merged state", rows[1]["funding_interval_h"], 4)
 check("focus rows are not sampled", rows[1]["sampled"], 0)
 check("extra empty while the state is fresh", [r["extra"] for r in rows][:3], ["", "", ""])
 check("extra holds the last message time once carried", rows[3]["extra"], json.dumps({"ts": T0 + 2100}, separators=(",", ":")))
@@ -105,6 +106,7 @@ check("rows_total counted", c.sd.counters["rows.bybit_linear.mark_price"], 4)
 tick("snapshot", T0, sym="BTC-27MAR26", markPrice="80000", fundingRate="", nextFundingTime="")
 c._mark_pass(S0 + 1, T0 + 1050)
 check("a future's empty funding reads as 0", sink.of("market.mark_price")[-1]["funding_rate"], 0.0)
+check("and its missing interval as 0 (unknown)", sink.of("market.mark_price")[-1]["funding_interval_h"], 0)
 check("silent past the limit: no row", c._mark_pass(S0 + 3600, T0 + 3_600_050), 0)
 c._mark_reset()
 check("a closed socket leaves no state to carry", c._mark_pass(S0 + 1, T0 + 1050), 0)

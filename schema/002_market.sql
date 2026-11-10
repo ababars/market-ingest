@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS market.mark_price
     settle_price      Float64 CODEC(Gorilla, ZSTD(3)),
     funding_rate      Float64 CODEC(Gorilla, ZSTD(3)),
     next_funding_time DateTime64(3, 'UTC') CODEC(Delta(8), ZSTD(3)),
+    -- Hours between funding payments; funding_rate is paid once per interval
+    -- (Binance and Bybit mostly 8, some symbols 4 or 1; Hyperliquid 1). Rates
+    -- are comparable only once scaled to one period. 0 = the venue did not say.
+    funding_interval_h UInt8 CODEC(ZSTD(1)),
     -- 0 = full-rate tick (focus universe), 1 = one-per-minute archive sample.
     -- Downstream must know whether a gap means "no data" or "lower resolution".
     sampled           UInt8   CODEC(ZSTD(1)),

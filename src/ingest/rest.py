@@ -72,6 +72,11 @@ class RestClient:
         self._roll()
         return max(self._local, self._server)
 
+    def window_left(self) -> float:
+        """Seconds until the budget window turns over."""
+        self._roll()
+        return max(0.0, (self._window + 1) * self.window_s - self.wall())
+
     async def _wait_pause(self) -> None:
         while (left := self.pause_until - time.monotonic()) > 0:
             await asyncio.sleep(left)
@@ -124,11 +129,24 @@ class RestClient:
         """GET and decode JSON. Returns None, spending nothing, if
         still_wanted() turns false while the call waits for its turn.
         Raises RateLimited on a limit status and HttpError on any other non-200."""
+        return await self._request("get", path, weight, stream, what, still_wanted,
+                                   params=params)
+
+    async def post(self, path: str, body, *, weight: int = 1, stream: str = "rest",
+                   what: str = "", still_wanted: Callable[[], bool] | None = None):
+        """POST a JSON body and decode the JSON reply, for venues that take
+        queries as bodies (Hyperliquid's /info). Same budget, pause and
+        errors as get()."""
+        return await self._request("post", path, weight, stream, what, still_wanted,
+                                   json=body)
+
+    async def _request(self, method: str, path: str, weight: int, stream: str, what: str,
+                       still_wanted, **kw):
         if not await self._acquire(weight, still_wanted):
             return None
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=self.timeout)
-        async with self._session.get(self.base_url + path, params=params) as r:
+        async with getattr(self._session, method)(self.base_url + path, **kw) as r:
             self._note_used(r.headers)
             if r.status in self.limited_statuses:
                 self.pause(stream, what or path, r.status, r.headers)

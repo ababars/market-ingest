@@ -92,6 +92,8 @@ def collector_rows(source: Path) -> list[dict]:
         sink = CaptureSink()
         collector = cls({"depth": {"enabled": True, "symbols": ["BTCUSDT"], "levels": 5}},
                         sink, focus=["BTCUSDT"], sd=QuietStats())
+        if not collector.depth:
+            continue  # the venue keeps no order book (Hyperliquid)
         collector._emit_book_rows(second, mono)
         bids, asks = [["99.9", "1.25"]], [["100.1", "1.75"]]
         far_bids = [["99.85", "2.125"], ["99.6", "3.375"],
