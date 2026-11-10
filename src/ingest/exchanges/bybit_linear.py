@@ -125,33 +125,46 @@ class BybitLinear(Collector):
     # -------------------------------------------------------------- handlers
 
     def _handle_trade(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
-        trades = payload.get("data") or []
         lag = None
-        for t in trades:
-            ev = float(t["T"])
-            lag = int(recv_ms - ev)
-            self.sink.write("market.trades", {
-                "exchange": EXCHANGE,
-                "symbol": t["s"],
-                "event_time": ch_ts(ev),
-                "ingest_time": ch_ts(recv_ms),
-                # No contiguous id exists, so loss cannot be proven per trade
-                # as on Binance; seq keeps the order, trade_id the identity.
-                "agg_id": int(t.get("seq", 0)),
-                "trade_id": t.get("i", ""),
-                "first_id": 0,
-                "last_id": 0,
-                "price": float(t["p"]),
-                "qty": float(t["v"]),
-                # S is the taker's side: a taker sell hits a resting buyer
-                "is_buyer_maker": 1 if t.get("S") == "Sell" else 0,
-                "extra": _extra(t, KNOWN_TRADE),
-            })
+        good = []
+        for t in payload.get("data") or []:
+            # One bad trade costs only itself, not the rest of the batch:
+            # Bybit has no contiguous ids to backfill a lost tail by.
+            try:
+                row = self._trade_row(t, recv_ms)
+            except Exception as exc:  # noqa: BLE001
+                self._bad_message("agg_trade", t, None, exc)
+                continue
+            self.sink.write("market.trades", row)
+            good.append(t)
+            lag = int(recv_ms - float(t["T"]))
+        trades = good
         if trades:
             st.observe(nbytes=nbytes, rows=len(trades), lag_ms=lag, symbol=trades[-1]["s"])
             self._count_rows("agg_trade", len(trades))
             self.sd.gauge(f"lag_ms.{EXCHANGE}.agg_trade", max(0, lag))
         self.sd.incr(f"bytes.{EXCHANGE}.agg_trade", nbytes)
+
+    @staticmethod
+    def _trade_row(t: dict, recv_ms: float) -> dict:
+        ev = float(t["T"])
+        return {
+            "exchange": EXCHANGE,
+            "symbol": t["s"],
+            "event_time": ch_ts(ev),
+            "ingest_time": ch_ts(recv_ms),
+            # No contiguous id exists, so loss cannot be proven per trade
+            # as on Binance; seq keeps the order, trade_id the identity.
+            "agg_id": int(t.get("seq", 0)),
+            "trade_id": t.get("i", ""),
+            "first_id": 0,
+            "last_id": 0,
+            "price": float(t["p"]),
+            "qty": float(t["v"]),
+            # S is the taker's side: a taker sell hits a resting buyer
+            "is_buyer_maker": 1 if t.get("S") == "Sell" else 0,
+            "extra": _extra(t, KNOWN_TRADE),
+        }
 
     def _handle_ticker(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
         d = payload.get("data") or {}
@@ -236,10 +249,10 @@ class BybitLinear(Collector):
             ev = float(it["T"])
             qty = _f(it.get("v"))
             self.sink.write("market.liquidations", {
-                "exchange": EXCHANGE,
-                "symbol": it["s"],
-                "event_time": ch_ts(ev),
-                "ingest_time": ch_ts(recv_ms),
+            "exchange": EXCHANGE,
+            "symbol": it["s"],
+            "event_time": ch_ts(ev),
+            "ingest_time": ch_ts(recv_ms),
                 "trade_time": ch_ts(ev),
                 # Bybit names the position (Buy = a long was liquidated);
                 # Binance names the liquidation order, which sells a long.
@@ -247,12 +260,12 @@ class BybitLinear(Collector):
                 "order_type": "",
                 "time_in_force": "",
                 "order_status": "",
-                "price": _f(it.get("p")),   # bankruptcy price
+            "price": _f(it.get("p")),   # bankruptcy price
                 "avg_price": 0.0,
                 "orig_qty": qty,
                 "last_filled_qty": qty,
                 "cum_filled_qty": qty,
-                "extra": _extra(it, KNOWN_LIQ),
+            "extra": _extra(it, KNOWN_LIQ),
             })
             st.observe(nbytes=nbytes, rows=1, lag_ms=int(recv_ms - ev), symbol=it["s"])
         if items:

@@ -44,6 +44,10 @@ clock = Clock()
 # The loop's own clock only; asyncio keeps the real one.
 base.time = types.SimpleNamespace(monotonic=clock.monotonic, time=time.time,
                                   strftime=time.strftime, gmtime=time.gmtime)
+# StreamStats measures silence by the same fake clock.
+import ingest.health as health
+health.time = types.SimpleNamespace(monotonic=clock.monotonic, time=time.time,
+                                    strftime=time.strftime, gmtime=time.gmtime)
 base.random = types.SimpleNamespace(random=lambda: 0.5)   # jitter factor 1.0
 
 
@@ -187,6 +191,16 @@ check("next report counts what it covers", bad[1]["detail"][:42],
 check("the message is quoted", bad[1]["detail"].endswith('message: {"boom":2}'), True)
 check("repair hook sees the decoded message, or None", c.repairs, [None, {"boom": 1}, {"boom": 2}])
 check("then the ordinary close and reconnect", pauses, [1.0])
+
+print("== a stream whose every message fails is still found stalled")
+msgs = []
+for _ in range(10):
+    msgs += ['{"boom":1}', Advance(0.5)]       # a message every 0.5 s, never 5 s of quiet
+c, pauses, _ = run_loop([FakeWS(msgs, life=0)], handle=handle, cfg={"stall_seconds": {"s": 3}})
+stall = c.sink.events("stall")
+check("stall reported", len(stall), 1)
+check("as a stall of usable messages", stall and stall[0]["detail"].startswith("no usable messages"), True)
+check("long before the messages ran out", c.sd.counts.get("bad_messages.test.s"), 8)
 
 print("== a failing repair hook does not end the stream either")
 class Broken(C):

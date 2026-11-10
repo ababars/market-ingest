@@ -303,6 +303,14 @@ check("subscriptions first, then a ping before each read", w.sent[:4], ["SUB1", 
 check("every message handled", got, [1, 2, 3])
 check("connection forgotten once closed", c._ws, {})
 
+print("== one bad trade in a batch costs only itself")
+c, sink = make()
+st = c._stat("agg_trade")
+good = lambda i: {"T": T0, "s": "BTCUSDT", "S": "Buy", "v": "1", "p": "1", "i": str(i), "seq": i}
+c._handle_trade({"data": [good(1), {**good(2), "p": None}, good(3)]}, T0 + 5, 100, st)
+check("the trades around it written", [r["trade_id"] for r in sink.of("market.trades")], ["1", "3"])
+check("counted", (st.rows, c.sd.counters["rows.bybit_linear.agg_trade"]), (2, 2))
+
 print("== a depth message that broke halfway: the live book is dropped and resubscribed")
 class SentWS:
     def __init__(self): self.sent = []

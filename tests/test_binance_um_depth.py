@@ -425,8 +425,8 @@ check("connected then dropped", one_attempt(fail=False), ["open", "close"])
 check("never connected: close only", one_attempt(fail=True), ["close"])
 
 print("== schema: row keys match market.book_agg exactly")
-# JSONEachRow rejects a whole batch over one unknown key, and the sink retries
-# a rejected batch forever, so a drift here would stall the table.
+# A key the table lacks is cut by the sink (logged, unknown_columns alarm):
+# the row lands, but that value never does.
 sql = (ROOT / "schema" / "004_book.sql").read_text()
 body = sql[sql.index("CREATE TABLE"): sql.index("ENGINE")]
 columns = set(re.findall(r"^\s+(\w+)\s+(?:LowCardinality|DateTime|Float|UInt)", body, re.M))

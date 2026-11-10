@@ -304,6 +304,13 @@ class Collector:
                     handle(payload, recv_ms, len(raw), st)
             except Exception as exc:  # noqa: BLE001 - one message must not end the stream
                 self._bad_message(stream, raw, payload, exc)
+            # Checked here too: a stream whose every message fails never goes
+            # quiet for the 5 s recv timeout, yet produces nothing.
+            if st.silent_for() > stall_after:
+                self._event(stream, "stall",
+                            f"no usable messages for {st.silent_for():.0f}s (limit {stall_after:.0f}s)")
+                log.error("%s produced nothing for %.0fs, reconnecting", stream, st.silent_for())
+                return
             self._roll_health()
 
     def _bad_message(self, stream: str, raw, payload, exc: Exception) -> None:

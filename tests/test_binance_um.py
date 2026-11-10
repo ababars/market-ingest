@@ -59,6 +59,20 @@ eth = [r for r in sink.of("market.mark_price") if r["symbol"] == "ETHUSDT"]
 check("one ETH row after minute rolls",   len(eth), 1)
 check("thinned row is sampled=1",         eth[0]["sampled"], 1)
 
+print("== one bad entry in the markPrice array costs only itself")
+c, sink = make(focus=("BTCUSDT", "ETHUSDT", "SOLUSDT"))
+def entry(sym, price):
+    return {"e": "markPriceUpdate", "E": T0 - 5, "s": sym, "p": price,
+            "i": "0", "P": "0", "r": "0", "T": T0}
+st = stats(c, "mark_price")
+c._handle_mark([entry("BTCUSDT", "1"), entry("ETHUSDT", "bad"), entry("SOLUSDT", "3")], T0, 100, st)
+check("the entries around it written",
+      [r["symbol"] for r in sink.of("market.mark_price")], ["BTCUSDT", "SOLUSDT"])
+check("the stream still counts as alive", st.rows, 2)
+before = st.rows
+c._handle_mark([entry("ETHUSDT", "bad")], T0 + 1000, 100, st)
+check("nothing usable: the silence is left for the watchdog", st.rows, before)
+
 print("== agg trade: forward id jump is logged as a gap, trade still stored")
 c, sink = make()
 def agg(agg_id, recv_ms=T0):

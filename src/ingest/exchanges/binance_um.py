@@ -115,6 +115,28 @@ class BinanceUM(Collector):
 
     # -------------------------------------------------------------- handlers
 
+    @staticmethod
+    def _mark_row(it: dict, recv_ms: float) -> dict:
+        """A market.mark_price row from one markPriceUpdate entry."""
+        sym = it["s"]
+        ev = float(it["E"])
+        return {
+            "exchange": EXCHANGE,
+            "symbol": sym,
+            "event_time": ch_ts(ev),
+            "ingest_time": ch_ts(recv_ms),
+            "mark_price": float(it.get("p", 0) or 0),
+            "index_price": float(it.get("i", 0) or 0),
+            "settle_price": float(it.get("P", 0) or 0),
+            "funding_rate": float(it.get("r", 0) or 0),
+            "next_funding_time": ch_ts(float(it.get("T", 0) or 0)),
+            # markPrice does not carry it; GET /fapi/v1/fundingInfo lists the
+            # symbols that are not on 8 h. Unknown until that is polled.
+            "funding_interval_h": 0,
+            "sampled": 0,
+            "extra": _extra(it, KNOWN_MARK),
+        }
+
     def _handle_mark(self, payload, recv_ms: float, nbytes: int, st: StreamStats) -> None:
         items = payload if isinstance(payload, list) else [payload]
         minute = int(recv_ms // 60000)
@@ -122,28 +144,19 @@ class BinanceUM(Collector):
             self._pending_minute = minute
 
         lag = None
+        good = 0
         for it in items:
-            if it.get("e") != "markPriceUpdate":
+            if not isinstance(it, dict) or it.get("e") != "markPriceUpdate":
                 continue
-            sym = it["s"]
-            ev = float(it["E"])
-            lag = int(recv_ms - ev)
-            row = {
-                "exchange": EXCHANGE,
-                "symbol": sym,
-                "event_time": ch_ts(ev),
-                "ingest_time": ch_ts(recv_ms),
-                "mark_price": float(it.get("p", 0) or 0),
-                "index_price": float(it.get("i", 0) or 0),
-                "settle_price": float(it.get("P", 0) or 0),
-                "funding_rate": float(it.get("r", 0) or 0),
-                "next_funding_time": ch_ts(float(it.get("T", 0) or 0)),
-                # markPrice does not carry it; GET /fapi/v1/fundingInfo lists the
-                # symbols that are not on 8 h. Unknown until that is polled.
-                "funding_interval_h": 0,
-                "sampled": 0,
-                "extra": _extra(it, KNOWN_MARK),
-            }
+            # One bad entry costs only itself, not the rest of the array.
+            try:
+                row = self._mark_row(it, recv_ms)
+            except Exception as exc:  # noqa: BLE001
+                self._bad_message("mark_price", it, None, exc)
+                continue
+            sym = row["symbol"]
+            lag = int(recv_ms - float(it["E"]))
+            good += 1
             if sym in self.focus:
                 self.sink.write("market.mark_price", row)
                 self._last_mark[sym] = row["mark_price"]
@@ -160,9 +173,11 @@ class BinanceUM(Collector):
             self._pending_mark.clear()
             self._pending_minute = minute
 
-        st.observe(nbytes=nbytes, rows=len(items), lag_ms=lag, symbol=None)
-        st.symbols.update(i.get("s", "") for i in items)
-        self._count_rows("mark_price", len(items))
+        if not good:
+            return      # nothing usable: let the stall watchdog see the silence
+        st.observe(nbytes=nbytes, rows=good, lag_ms=lag, symbol=None)
+        st.symbols.update(i.get("s", "") for i in items if isinstance(i, dict))
+        self._count_rows("mark_price", good)
         self.sd.incr(f"bytes.{EXCHANGE}.mark_price", nbytes)
         if lag is not None:
             self.sd.gauge(f"lag_ms.{EXCHANGE}.mark_price", max(0, lag))
