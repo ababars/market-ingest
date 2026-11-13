@@ -116,6 +116,8 @@ class Collector:
         # per stream: [messages skipped since the last report, monotonic time of it]
         self._bad: dict[str, list[float]] = {}
         self._repairs: dict[str, tuple[float, int]] = {}   # symbol -> (last repair, count)
+        # HTTP CONNECT proxy for the WebSocket; None keeps websockets' default
+        self.proxy: str | None = None
         self.collector_version = os.environ.get("COLLECTOR_VERSION", "")
 
         self.seq = SequenceTracker()
@@ -223,9 +225,12 @@ class Collector:
             st = self._stat(stream)
             try:
                 self._event(stream, "start", url)
+                # Only passed when set: proxy=None would turn off the
+                # environment proxy that connectors without one get today.
+                kw = {"proxy": self.proxy} if self.proxy else {}
                 async with websockets.connect(
                     url, open_timeout=20, ping_interval=self.ws_ping_interval,
-                    ping_timeout=self.ws_ping_timeout, max_size=16 * 1024 * 1024,
+                    ping_timeout=self.ws_ping_timeout, max_size=16 * 1024 * 1024, **kw,
                 ) as ws:
                     opened = time.monotonic()
                     st.last_msg_monotonic = time.monotonic()

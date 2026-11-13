@@ -60,6 +60,10 @@ open_interest_symbols      = "focus"   # "focus" or "all"
 # from it; the collector follows Binance's own count when it is higher.
 rest_weight_per_minute = 1200
 
+# Optional HTTP CONNECT proxy for this collector's WebSockets and REST calls.
+# Basic auth travels in clear text: restrict the proxy by firewall to this host's IP.
+# proxy = "http://user:pass@host:3128"
+
 # Binance drops WebSocket connections after 24h. Beat it to the punch.
 # (Must stay above the first [binance_um.*] header: TOML would otherwise file
 # it under that table, where nothing reads it.)

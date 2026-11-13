@@ -328,6 +328,36 @@ check("all four", sorted(n for n in c._primed_counters() if n.startswith("bad_me
       ["bad_messages.binance_um.agg_trade", "bad_messages.binance_um.depth",
        "bad_messages.binance_um.force_order", "bad_messages.binance_um.mark_price"])
 
+print("== proxy: reaches websockets.connect only when configured")
+import ingest.exchanges.base as base
+class _WS:
+    async def recv(self): raise RuntimeError("dropped")
+class _Conn:
+    async def __aenter__(self): return _WS()
+    async def __aexit__(self, *a): return False
+def connect_kwargs(cfg):
+    c, _ = make(cfg)
+    seen = []
+    real_connect = getattr(base.websockets, "connect", None)
+    real_sleep = asyncio.sleep
+    base.websockets.connect = lambda *a, **k: (seen.append(k), _Conn())[1]
+    async def stop(*_): raise asyncio.CancelledError   # end the loop at the backoff
+    asyncio.sleep = stop
+    async def go():
+        try: await c._ws_loop("agg_trade", "wss://x", lambda *a: None)
+        except asyncio.CancelledError: pass
+    try: asyncio.run(go())
+    finally: base.websockets.connect, asyncio.sleep = real_connect, real_sleep
+    return c, seen[0]
+c, k = connect_kwargs({"proxy": "http://u:p@h:3128"})
+check("ws: proxy passed", k.get("proxy"), "http://u:p@h:3128")
+check("rest: same proxy", c.rest.proxy, "http://u:p@h:3128")
+c, k = connect_kwargs({})
+check("ws: no proxy kwarg without config", "proxy" in k, False)
+check("rest: no proxy without config", c.rest.proxy, None)
+c, k = connect_kwargs({"proxy": ""})
+check("empty proxy counts as unset", ("proxy" in k, c.rest.proxy), (False, None))
+
 print()
 print("ALL PASSED" if not fails else f"FAILURES: {fails}")
 raise SystemExit(1 if fails else 0)

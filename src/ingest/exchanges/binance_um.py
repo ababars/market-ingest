@@ -71,8 +71,11 @@ class BinanceUM(Collector):
         self._pending_minute: int = 0
         # Binance allows 2400 weight a minute per IP; the default leaves half
         # to whatever else runs from the same address.
+        # Optional HTTP CONNECT proxy for both the WebSockets and REST.
+        self.proxy = cfg.get("proxy") or None
         self.rest = RestClient(REST, budget=int(cfg.get("rest_weight_per_minute", 1200)),
-                               used_header=USED_WEIGHT, on_event=self._event)
+                               used_header=USED_WEIGHT, on_event=self._event,
+                               proxy=self.proxy)
 
         # Order book (stream A of the early-collector spec): a local book per
         # symbol, written as one aggregate row per second. Off unless enabled.
